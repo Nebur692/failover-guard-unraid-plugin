@@ -3,7 +3,7 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "failover-guard">
 <!ENTITY author    "Nebur692">
-<!ENTITY version   "2026.08.20.1">
+<!ENTITY version   "2026.08.20.2">
 <!ENTITY launch    "Settings/FailoverGuard">
 <!ENTITY gitURL    "https://raw.githubusercontent.com/Nebur692/failover-guard-unraid-plugin/main">
 <!ENTITY pluginURL "&gitURL;/&name;.plg">
@@ -17,6 +17,13 @@
         min="6.12.0">
 
 <CHANGES>
+###2026.08.20.2
+- The settings page, the checks output and the notifications now follow the
+  language selected in Unraid (Settings -> Display Settings), instead of showing
+  both languages at once. Spanish when the locale starts with "es", English
+  otherwise, so any other language still gets a readable page. The log file
+  stays in English on purpose: it is what gets pasted into a bug report.
+
 ###2026.08.20.1
 - The settings page now shows the log: last 100 to 2000 lines, with refresh,
   clear, and an optional 5 second auto-refresh that keeps the newest lines in
@@ -97,6 +104,13 @@ MODE="${1:-status}"
 # ---- Helpers ------------------------------------------------------------
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG"; }
+
+# Follows the language picked in Unraid, for the things a person reads: the
+# checks output and the notifications. The log itself stays in English on
+# purpose — it is what gets pasted into a bug report.
+DYN_LOCALE=$(grep -oP '(?<=^locale=")[^"]*' /boot/config/plugins/dynamix/dynamix.cfg 2>/dev/null)
+case "$DYN_LOCALE" in es*) LANG_ES=1 ;; *) LANG_ES=0 ;; esac
+tt() { [ "$LANG_ES" = "1" ] && echo "$2" || echo "$1"; }
 
 notify() {
     [ "$NOTIFY" = "yes" ] || return 0
@@ -269,22 +283,22 @@ do_failover() {
 
     if ! target_ready; then
         log "Failover target is not ready; refusing to switch"
-        notify "Failover NOT performed" "The failover target is not reachable or your dynamic DNS is stale." "alert"
+        notify "$(tt 'Failover NOT performed' 'Failover NO ejecutado')" "$(tt 'The failover target is not reachable or your dynamic DNS is stale.' 'El destino del failover no es alcanzable o tu DNS dinámico está desactualizado.')" "alert"
         return 1
     fi
 
     # Enable locally first: switching DNS onto a box that does not serve the
     # domain yet would hand users an error.
-    npm_enable || { notify "Failover failed" "Could not enable the NPM host." "alert"; return 1; }
+    npm_enable || { notify "$(tt 'Failover failed' 'Failover fallido')" "$(tt 'Could not enable the NPM host.' 'No se pudo habilitar el host de NPM.')" "alert"; return 1; }
 
     if dns_point_to "$FAILOVER_TARGET"; then
         date +%s > "$STATE/switched"
-        notify "Failover performed" "$DOMAIN now points to $FAILOVER_TARGET and is served from this server." "alert"
+        notify "$(tt 'Failover performed' 'Failover ejecutado')" "$(tt "$DOMAIN now points to $FAILOVER_TARGET and is served from this server." "$DOMAIN ahora apunta a $FAILOVER_TARGET y se sirve desde este servidor.")" "alert"
         return 0
     fi
 
     npm_disable
-    notify "Failover failed" "DNS could not be updated; the local host was left disabled so two copies never serve at once." "alert"
+    notify "$(tt 'Failover failed' 'Failover fallido')" "$(tt 'DNS could not be updated; the local host was left disabled so two copies never serve at once.' 'No se pudo cambiar el DNS; el host local se dejó deshabilitado para que nunca sirvan dos copias a la vez.')" "alert"
     return 1
 }
 
@@ -303,14 +317,14 @@ do_failback() {
     if ! run_hook "$HOOK_PRE_FAILBACK" "pre-failback"; then
         log "Data hook failed; keeping this box in service"
         npm_enable
-        notify "Failback aborted" "The pre-failback hook failed, so we keep serving locally rather than lose data." "alert"
+        notify "$(tt 'Failback aborted' 'Failback abortado')" "$(tt 'The pre-failback hook failed, so we keep serving locally rather than lose data.' 'El enganche previo al failback falló, así que se sigue sirviendo en local en vez de perder datos.')" "alert"
         return 1
     fi
 
     if dns_point_to "$ip"; then
         rm -f "$STATE/switched"
         date +%s > "$STATE/last_replicate"
-        notify "Failback complete" "$DOMAIN is served from the origin again ($ip). The local host is disabled." "normal"
+        notify "$(tt 'Failback complete' 'Failback completado')" "$(tt "$DOMAIN is served from the origin again ($ip). The local host is disabled." "$DOMAIN vuelve a servirse desde el origen ($ip). El host local queda deshabilitado.")" "normal"
         return 0
     fi
 
@@ -393,15 +407,24 @@ case "$MODE" in
     replicate) run_hook "$HOOK_REPLICATE" "replicate" && date +%s > "$STATE/last_replicate" ;;
     test)
         origin_health; h=$?
-        printf 'enabled:        %s\n' "$ENABLED"
-        printf 'local network:  %s\n' "$(local_net_ok && echo OK || echo FAIL)"
-        printf 'origin ports:   %s\n' "$(origin_ports_open && echo OK || echo FAIL)"
-        printf 'origin app:     %s\n' "$([ -z "$HEALTH_PATH" ] && echo "not configured" || (origin_app_ok && echo OK || echo FAIL))"
-        printf 'origin health:  %s\n' "$([ $h -eq 0 ] && echo HEALTHY || ([ $h -eq 2 ] && echo INCONCLUSIVE || echo DOWN))"
-        printf 'target ready:   %s\n' "$(target_ready && echo OK || echo FAIL)"
-        printf 'npm host:       %s\n' "$(npm_state)"
-        printf 'switched:       %s\n' "$([ -f "$STATE/switched" ] && echo yes || echo no)"
-        printf 'watcher:        %s\n' "$(watcher_running && echo running || echo stopped)"
+        w=22
+        printf "%-${w}s %s\n" "$(tt 'enabled:' 'activado:')" "$ENABLED"
+        printf "%-${w}s %s\n" "$(tt 'local network:' 'red local:')" \
+               "$(local_net_ok && echo OK || echo "$(tt FAIL FALLO)")"
+        printf "%-${w}s %s\n" "$(tt 'origin ports:' 'puertos del origen:')" \
+               "$(origin_ports_open && echo OK || echo "$(tt FAIL FALLO)")"
+        printf "%-${w}s %s\n" "$(tt 'origin app:' 'aplicación del origen:')" \
+               "$([ -z "$HEALTH_PATH" ] && tt 'not configured' 'sin configurar' || (origin_app_ok && echo OK || echo "$(tt FAIL FALLO)"))"
+        printf "%-${w}s %s\n" "$(tt 'origin health:' 'salud del origen:')" \
+               "$([ $h -eq 0 ] && tt HEALTHY SANO || ([ $h -eq 2 ] && tt INCONCLUSIVE 'NO CONCLUYENTE' || tt DOWN CAÍDO))"
+        printf "%-${w}s %s\n" "$(tt 'target ready:' 'destino listo:')" \
+               "$(target_ready && echo OK || echo "$(tt FAIL FALLO)")"
+        printf "%-${w}s %s\n" "$(tt 'npm host:' 'host de NPM:')" \
+               "$(s=$(npm_state); [ "$s" = "1" ] && tt 'enabled' 'habilitado' || { [ "$s" = "0" ] && tt 'disabled' 'deshabilitado' || echo "$s"; })"
+        printf "%-${w}s %s\n" "$(tt 'switched:' 'conmutado:')" \
+               "$([ -f "$STATE/switched" ] && tt yes sí || tt no no)"
+        printf "%-${w}s %s\n" "$(tt 'watcher:' 'vigilante:')" \
+               "$(watcher_running && tt running 'en marcha' || tt stopped parado)"
         ;;
     status)
         jq -n --arg enabled "$ENABLED" \
@@ -415,7 +438,7 @@ case "$MODE" in
 esac
 ]]>
  </INLINE>
- <SHA256>db4ca5e2ae40b6984123baa46c4c95db10089427353f9310495505c84b8abcc9</SHA256>
+ <SHA256>a13a478cc67a398c96a64dbdc85a0b85c2b77a5dea87eaf3385ee1156ef7819d</SHA256>
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/failover-guard/scripts/supervise" Mode="0755">
@@ -466,18 +489,32 @@ Icon="fa-exchange"
 ---
 <?php
 /* Failover Guard — settings page.
-   Bilingual on purpose: this box is used by people who read either language. */
+   The page follows the language picked in Unraid (Settings -> Display Settings),
+   read straight from dynamix.cfg. Spanish if the locale starts with "es",
+   English otherwise, so any other language falls back to something readable
+   rather than to an empty page. */
 
 $plugin  = "failover-guard";
 $cfgfile = "/boot/config/plugins/$plugin/config";
 $script  = "/usr/local/emhttp/plugins/$plugin/scripts/failover-guard";
 
+$dyn    = @parse_ini_file("/boot/config/plugins/dynamix/dynamix.cfg");
+$locale = $dyn['locale'] ?? '';
+$ES     = (stripos($locale, 'es') === 0);
+
+/* t() picks the string for the active language. Kept deliberately simple: a
+   full language-pack integration would mean shipping .txt files that only get
+   loaded when the matching pack is installed, and this page has to work either
+   way. */
+function t($en, $es) { global $ES; return $ES ? $es : $en; }
+
 $cfg = file_exists($cfgfile) ? parse_ini_file($cfgfile) : [];
 function v($cfg, $k, $d = "") { return htmlspecialchars($cfg[$k] ?? $d); }
 
-$status = json_decode(shell_exec("bash " . escapeshellarg($script) . " status 2>/dev/null"), true) ?: [];
+$status   = json_decode(shell_exec("bash " . escapeshellarg($script) . " status 2>/dev/null"), true) ?: [];
 $switched = ($status['switched'] ?? 'no') === 'yes';
 $watcher  = $status['watcher'] ?? 'stopped';
+$lastrep  = (int)($status['last_replicate'] ?? 0);
 ?>
 
 <style>
@@ -485,148 +522,134 @@ $watcher  = $status['watcher'] ?? 'stopped';
 .fg-ok    { background:#1a7f37; color:#fff; }
 .fg-warn  { background:#9a6700; color:#fff; }
 .fg-bad   { background:#b32d2e; color:#fff; }
-.fg-note  { opacity:.75; font-size:.9em; }
 </style>
 
 <div style="margin-bottom:14px">
   <span class="fg-state <?= $watcher === 'running' ? 'fg-ok' : 'fg-bad' ?>">
-    Watcher: <?= $watcher ?>
+    <?= t('Watcher', 'Vigilante') ?>: <?= $watcher === 'running' ? t('running','en marcha') : t('stopped','parado') ?>
   </span>
   <span class="fg-state <?= $switched ? 'fg-warn' : 'fg-ok' ?>">
-    <?= $switched ? 'FAILED OVER — serving locally / CONMUTADO — sirviendo en local'
-                  : 'Normal — origin is serving / Normal — sirve el origen' ?>
+    <?= $switched ? t('FAILED OVER — serving locally', 'CONMUTADO — sirviendo en local')
+                  : t('Normal — the origin is serving', 'Normal — sirve el origen') ?>
   </span>
+  <?php if ($lastrep > 0): ?>
+  <span class="fg-state fg-ok">
+    <?= t('Last replica', 'Última réplica') ?>: <?= date('d/m/Y H:i', $lastrep) ?>
+  </span>
+  <?php endif; ?>
 </div>
 
 <form markdown="1" method="POST" action="/update.htm" target="progressFrame">
 <input type="hidden" name="#file" value="<?= $plugin ?>/config">
 
-**Enable failover / Activar el failover:**
+**<?= t('Enable failover', 'Activar el failover') ?>:**
 : <select name="ENABLED">
-  <option value="no"  <?= v($cfg,'ENABLED','no')=='no'  ? 'selected' : '' ?>>No</option>
-  <option value="yes" <?= v($cfg,'ENABLED','no')=='yes' ? 'selected' : '' ?>>Yes / Sí</option>
+  <option value="no"  <?= v($cfg,'ENABLED','no')=='no'  ? 'selected' : '' ?>><?= t('No','No') ?></option>
+  <option value="yes" <?= v($cfg,'ENABLED','no')=='yes' ? 'selected' : '' ?>><?= t('Yes','Sí') ?></option>
   </select>
 
-> While this is off the watcher stays stopped and nothing is ever switched.
-> Mientras esté en No, el vigilante no arranca y nunca se conmuta nada.
+> <?= t('While this is off the watcher stays stopped and nothing is ever switched.',
+       'Mientras esté en No, el vigilante no arranca y nunca se conmuta nada.') ?>
 
-### Origin / Origen
+### <?= t('Origin', 'Origen') ?>
 
-**Origin host / Host del origen:**
+**<?= t('Origin host', 'Host del origen') ?>:**
 : <input type="text" name="ORIGIN_HOST" value="<?= v($cfg,'ORIGIN_HOST') ?>" placeholder="vps.example.com">
 
-> The real host name of the remote server, NOT the public domain. If your domain
-> sits behind a CDN it answers even when the origin is dead, so it is useless here.
-> El nombre real del servidor remoto, NO el dominio público: si el dominio pasa por
-> un CDN, responde aunque el origen esté muerto y no sirve para vigilar.
+> <?= t('The real host name of the remote server, NOT the public domain. If your domain sits behind a CDN it answers even when the origin is dead, so it is useless for watching.',
+       'El nombre real del servidor remoto, NO el dominio público: si el dominio pasa por un CDN, responde aunque el origen esté muerto y no sirve para vigilar.') ?>
 
-**TCP ports to probe / Puertos TCP a sondear:**
+**<?= t('TCP ports to probe', 'Puertos TCP a sondear') ?>:**
 : <input type="text" name="ORIGIN_PORTS" value="<?= v($cfg,'ORIGIN_PORTS','443') ?>" placeholder="22 443">
 
-**Health path / Ruta de salud:**
+**<?= t('Health path', 'Ruta de salud') ?>:**
 : <input type="text" name="HEALTH_PATH" value="<?= v($cfg,'HEALTH_PATH') ?>" placeholder="/api/health">
 
-> Optional but strongly recommended: an open port only proves the machine booted,
-> not that the site works. Left empty, only ports are checked.
-> Opcional pero muy recomendable: un puerto abierto solo demuestra que la máquina
-> arrancó, no que el sitio funcione. Vacío, solo se comprueban los puertos.
+> <?= t('Optional but strongly recommended: an open port only proves the machine booted, not that the site works. Left empty, only ports are checked.',
+       'Opcional pero muy recomendable: un puerto abierto solo demuestra que la máquina arrancó, no que el sitio funcione. Vacío, solo se comprueban los puertos.') ?>
 
-**Expected in response / Se espera en la respuesta:**
+**<?= t('Expected in response', 'Se espera en la respuesta') ?>:**
 : <input type="text" name="HEALTH_EXPECT" value="<?= v($cfg,'HEALTH_EXPECT') ?>" placeholder='"ok":true'>
 
-### Switching / Conmutación
+### <?= t('Switching', 'Conmutación') ?>
 
-**Domain / Dominio:**
+**<?= t('Domain', 'Dominio') ?>:**
 : <input type="text" name="DOMAIN" value="<?= v($cfg,'DOMAIN') ?>" placeholder="example.com">
 
-**Failover target / Destino del failover:**
+**<?= t('Failover target', 'Destino del failover') ?>:**
 : <input type="text" name="FAILOVER_TARGET" value="<?= v($cfg,'FAILOVER_TARGET') ?>" placeholder="home.example.com">
 
-> A host name (becomes a CNAME) or an IP (becomes an A record) pointing at this
-> box. A dynamic DNS name with a short TTL works best.
-> Un nombre de host (se pone como CNAME) o una IP (registro A) que apunte a este
-> servidor. Lo ideal es un nombre de DNS dinámico con TTL corto.
+> <?= t('A host name (becomes a CNAME) or an IP (becomes an A record) pointing at this box. A dynamic DNS name with a short TTL works best.',
+       'Un nombre de host (se pone como CNAME) o una IP (registro A) que apunte a este servidor. Lo ideal es un nombre de DNS dinámico con TTL corto.') ?>
 
-**Cloudflare API token / Token de API de Cloudflare:**
+**<?= t('Cloudflare API token', 'Token de API de Cloudflare') ?>:**
 : <input type="password" name="CF_TOKEN" value="<?= v($cfg,'CF_TOKEN') ?>">
 
-> Needs Zone:Read and DNS:Edit on that zone only.
-> Necesita Zone:Read y DNS:Edit únicamente sobre esa zona.
+> <?= t('Needs Zone:Read and DNS:Edit on that zone only.',
+       'Necesita Zone:Read y DNS:Edit únicamente sobre esa zona.') ?>
 
-**Check interval (s) / Intervalo de comprobación (s):**
+**<?= t('Check interval (s)', 'Intervalo de comprobación (s)') ?>:**
 : <input type="number" name="CHECK_INTERVAL" min="5" max="600" value="<?= v($cfg,'CHECK_INTERVAL','10') ?>">
 
-**Failures before switching / Fallos antes de conmutar:**
+**<?= t('Failures before switching', 'Fallos antes de conmutar') ?>:**
 : <input type="number" name="FAIL_THRESHOLD" min="1" max="20" value="<?= v($cfg,'FAIL_THRESHOLD','3') ?>">
 
-> Detection time is roughly interval × failures. Three failures avoids switching
-> on a passing network blip.
-> El tiempo de detección es aproximadamente intervalo × fallos. Tres fallos evitan
-> conmutar por un bache de red pasajero.
+> <?= t('Detection time is roughly interval x failures. Three failures avoids switching on a passing network blip.',
+       'El tiempo de detección es aproximadamente intervalo × fallos. Tres fallos evitan conmutar por un bache de red pasajero.') ?>
 
-### Nginx Proxy Manager (optional / opcional)
+### <?= t('Nginx Proxy Manager (optional)', 'Nginx Proxy Manager (opcional)') ?>
 
-**NPM data path / Ruta de datos de NPM:**
+**<?= t('NPM data path', 'Ruta de datos de NPM') ?>:**
 : <input type="text" name="NPM_DATA" value="<?= v($cfg,'NPM_DATA') ?>" placeholder="/mnt/user/appdata/NginxProxyManager/data">
 
-**NPM container / Contenedor de NPM:**
+**<?= t('NPM container', 'Contenedor de NPM') ?>:**
 : <input type="text" name="NPM_CONTAINER" value="<?= v($cfg,'NPM_CONTAINER','Nginx-Proxy-Manager-Official') ?>">
 
-**Proxy host ID / ID del proxy host:**
+**<?= t('Proxy host ID', 'ID del proxy host') ?>:**
 : <input type="text" name="NPM_HOST_ID" value="<?= v($cfg,'NPM_HOST_ID') ?>" placeholder="65">
 
-> The local host stays disabled while the origin is healthy, so two copies never
-> accept writes at the same time. It is enabled only during a failover.
-> El host local permanece deshabilitado mientras el origen está sano, para que
-> nunca haya dos copias aceptando escrituras. Solo se habilita durante un failover.
+> <?= t('The local host stays disabled while the origin is healthy, so two copies never accept writes at the same time. It is enabled only during a failover.',
+       'El host local permanece deshabilitado mientras el origen está sano, para que nunca haya dos copias aceptando escrituras. Solo se habilita durante un failover.') ?>
 
-### Data hooks / Enganches de datos
+### <?= t('Data hooks', 'Enganches de datos') ?>
 
-**Replicate hook / Enganche de réplica:**
+**<?= t('Replicate hook', 'Enganche de réplica') ?>:**
 : <input type="text" name="HOOK_REPLICATE" value="<?= v($cfg,'HOOK_REPLICATE') ?>" placeholder="/boot/config/plugins/failover-guard/replicate.sh">
 
-**Pre-failback hook / Enganche previo al failback:**
+**<?= t('Pre-failback hook', 'Enganche previo al failback') ?>:**
 : <input type="text" name="HOOK_PRE_FAILBACK" value="<?= v($cfg,'HOOK_PRE_FAILBACK') ?>" placeholder="/boot/config/plugins/failover-guard/failback.sh">
 
-> This plugin never touches your data — only you know what your data is. The
-> replicate hook copies origin → here while all is well. The pre-failback hook
-> copies here → origin before returning, and it runs with the local host already
-> disabled, so nothing can be written mid-copy. If it fails, the failback is
-> aborted and this box keeps serving.
-> El plugin no toca tus datos: solo tú sabes cuáles son. El enganche de réplica
-> copia origen → aquí mientras todo va bien. El de pre-failback copia aquí →
-> origen antes de volver, y se ejecuta con el host local ya deshabilitado, así que
-> nada puede escribirse a mitad de copia. Si falla, el failback se aborta y este
-> servidor sigue sirviendo.
+> <?= t('This plugin never touches your data — only you know what your data is. The replicate hook copies origin to here while all is well. The pre-failback hook copies here to origin before returning, and it runs with the local host already disabled, so nothing can be written mid-copy. If it fails, the failback is aborted and this box keeps serving.',
+       'El plugin no toca tus datos: solo tú sabes cuáles son. El enganche de réplica copia origen → aquí mientras todo va bien. El de pre-failback copia aquí → origen antes de volver, y se ejecuta con el host local ya deshabilitado, así que nada puede escribirse a mitad de copia. Si falla, el failback se aborta y este servidor sigue sirviendo.') ?>
 
-**Replicate interval (s) / Intervalo de réplica (s):**
+**<?= t('Replicate interval (s)', 'Intervalo de réplica (s)') ?>:**
 : <input type="number" name="REPLICATE_INTERVAL" min="300" value="<?= v($cfg,'REPLICATE_INTERVAL','3600') ?>">
 
-**Notifications / Notificaciones:**
+**<?= t('Notifications', 'Notificaciones') ?>:**
 : <select name="NOTIFY">
-  <option value="yes" <?= v($cfg,'NOTIFY','yes')=='yes' ? 'selected' : '' ?>>Yes / Sí</option>
-  <option value="no"  <?= v($cfg,'NOTIFY','yes')=='no'  ? 'selected' : '' ?>>No</option>
+  <option value="yes" <?= v($cfg,'NOTIFY','yes')=='yes' ? 'selected' : '' ?>><?= t('Yes','Sí') ?></option>
+  <option value="no"  <?= v($cfg,'NOTIFY','yes')=='no'  ? 'selected' : '' ?>><?= t('No','No') ?></option>
   </select>
 
 &nbsp;
-: <input type="submit" value="Apply / Aplicar"><input type="button" value="Done / Hecho" onclick="done()">
+: <input type="submit" value="<?= t('Apply','Aplicar') ?>"><input type="button" value="<?= t('Done','Hecho') ?>" onclick="done()">
 
 </form>
 
-### Checks / Comprobaciones
+### <?= t('Checks', 'Comprobaciones') ?>
 
-<pre id="fgtest" style="max-height:260px;overflow:auto">Press the button to run every check without changing anything.
-Pulsa el botón para ejecutar todas las comprobaciones sin cambiar nada.</pre>
+<pre id="fgtest" style="max-height:260px;overflow:auto"><?= t('Press the button to run every check without changing anything.',
+                                                              'Pulsa el botón para ejecutar todas las comprobaciones sin cambiar nada.') ?></pre>
 
-<input type="button" value="Run checks / Comprobar" onclick="fgTest()">
+<input type="button" value="<?= t('Run checks','Comprobar') ?>" onclick="fgTest()">
 
-### Log / Registro
+### <?= t('Log', 'Registro') ?>
 
-<pre id="fglog" style="max-height:420px;overflow:auto">Loading… / Cargando…</pre>
+<pre id="fglog" style="max-height:420px;overflow:auto"><?= t('Loading…','Cargando…') ?></pre>
 
-<input type="button" value="Refresh / Actualizar" onclick="fgLog()">
-<input type="button" value="Clear / Vaciar" onclick="fgClear()">
-<label><input type="checkbox" id="fgauto" onchange="fgAuto()"> Auto-refresh (5s) / Auto-actualizar (5s)</label>
+<input type="button" value="<?= t('Refresh','Actualizar') ?>" onclick="fgLog()">
+<input type="button" value="<?= t('Clear','Vaciar') ?>" onclick="fgClear()">
+<label><input type="checkbox" id="fgauto" onchange="fgAuto()"> <?= t('Auto-refresh (5s)','Auto-actualizar (5s)') ?></label>
 <select id="fglines" onchange="fgLog()">
   <option value="100">100</option>
   <option value="200" selected>200</option>
@@ -634,13 +657,14 @@ Pulsa el botón para ejecutar todas las comprobaciones sin cambiar nada.</pre>
   <option value="2000">2000</option>
 </select>
 
-> Full file / Fichero completo: `/var/log/<?= $plugin ?>.log`
+> <?= t('Full file','Fichero completo') ?>: `/var/log/<?= $plugin ?>.log`
 
 <script>
 var fgTimer = null;
+var fgRunning = <?= json_encode(t('Running…','Comprobando…')) ?>;
 
 function fgTest() {
-  document.getElementById('fgtest').textContent = 'Running… / Comprobando…';
+  document.getElementById('fgtest').textContent = fgRunning;
   $.post('/plugins/<?= $plugin ?>/include/action.php', {action:'test'}, function(d) {
     document.getElementById('fgtest').textContent = d;
   });
@@ -676,7 +700,7 @@ $(function() {
 </script>
 ]]>
  </INLINE>
- <SHA256>ff38f468bfe6ed3133a523bafb7fc371623845f130244515afe20236d8425e3c</SHA256>
+ <SHA256>e6f6d4985b864a795d61e683bee5afaa9801e2d80dcf363995008815e1e1ce94</SHA256>
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/failover-guard/include/action.php" Mode="0644">
