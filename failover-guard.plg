@@ -3,7 +3,7 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "failover-guard">
 <!ENTITY author    "Nebur692">
-<!ENTITY version   "2026.08.20">
+<!ENTITY version   "2026.08.20.1">
 <!ENTITY launch    "Settings/FailoverGuard">
 <!ENTITY gitURL    "https://raw.githubusercontent.com/Nebur692/failover-guard-unraid-plugin/main">
 <!ENTITY pluginURL "&gitURL;/&name;.plg">
@@ -17,6 +17,11 @@
         min="6.12.0">
 
 <CHANGES>
+###2026.08.20.1
+- The settings page now shows the log: last 100 to 2000 lines, with refresh,
+  clear, and an optional 5 second auto-refresh that keeps the newest lines in
+  view. Until now the page only told you where the file was.
+
 ###2026.08.20
 - First release. Watches a remote origin from your Unraid box and fails over
   automatically when it dies: switches the Cloudflare DNS records of a zone to a
@@ -615,19 +620,63 @@ Pulsa el botón para ejecutar todas las comprobaciones sin cambiar nada.</pre>
 
 <input type="button" value="Run checks / Comprobar" onclick="fgTest()">
 
+### Log / Registro
+
+<pre id="fglog" style="max-height:420px;overflow:auto">Loading… / Cargando…</pre>
+
+<input type="button" value="Refresh / Actualizar" onclick="fgLog()">
+<input type="button" value="Clear / Vaciar" onclick="fgClear()">
+<label><input type="checkbox" id="fgauto" onchange="fgAuto()"> Auto-refresh (5s) / Auto-actualizar (5s)</label>
+<select id="fglines" onchange="fgLog()">
+  <option value="100">100</option>
+  <option value="200" selected>200</option>
+  <option value="500">500</option>
+  <option value="2000">2000</option>
+</select>
+
+> Full file / Fichero completo: `/var/log/<?= $plugin ?>.log`
+
 <script>
+var fgTimer = null;
+
 function fgTest() {
   document.getElementById('fgtest').textContent = 'Running… / Comprobando…';
   $.post('/plugins/<?= $plugin ?>/include/action.php', {action:'test'}, function(d) {
     document.getElementById('fgtest').textContent = d;
   });
 }
-</script>
 
-> Log: `/var/log/<?= $plugin ?>.log`
+function fgLog() {
+  var n = document.getElementById('fglines').value;
+  $.post('/plugins/<?= $plugin ?>/include/action.php', {action:'log', lines:n}, function(d) {
+    var box = document.getElementById('fglog');
+    // Keep the newest lines in view: that is what you came to read.
+    var stuck = (box.scrollTop + box.clientHeight >= box.scrollHeight - 30);
+    box.textContent = d;
+    if (stuck) box.scrollTop = box.scrollHeight;
+  });
+}
+
+function fgClear() {
+  $.post('/plugins/<?= $plugin ?>/include/action.php', {action:'clearlog'}, function() { fgLog(); });
+}
+
+function fgAuto() {
+  if (document.getElementById('fgauto').checked) {
+    fgTimer = setInterval(fgLog, 5000);
+  } else {
+    clearInterval(fgTimer); fgTimer = null;
+  }
+}
+
+$(function() {
+  fgLog();
+  document.getElementById('fglog').scrollTop = document.getElementById('fglog').scrollHeight;
+});
+</script>
 ]]>
  </INLINE>
- <SHA256>2fedcca770415266d4408d1154b0bd5f83ea6dd6a3f50eab34c4871fea1a20ac</SHA256>
+ <SHA256>ff38f468bfe6ed3133a523bafb7fc371623845f130244515afe20236d8425e3c</SHA256>
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/failover-guard/include/action.php" Mode="0644">
@@ -639,6 +688,7 @@ function fgTest() {
    watcher's job, and a stray click should never move a live site. */
 
 $script = "/usr/local/emhttp/plugins/failover-guard/scripts/failover-guard";
+$logfile = "/var/log/failover-guard.log";
 $action = $_POST['action'] ?? '';
 
 switch ($action) {
@@ -646,17 +696,34 @@ switch ($action) {
         header('Content-Type: text/plain; charset=utf-8');
         echo shell_exec("bash " . escapeshellarg($script) . " test 2>&1");
         break;
+
     case 'status':
         header('Content-Type: application/json; charset=utf-8');
         echo shell_exec("bash " . escapeshellarg($script) . " status 2>&1");
         break;
+
+    case 'log':
+        header('Content-Type: text/plain; charset=utf-8');
+        if (!file_exists($logfile)) { echo "No log yet / Todavía no hay registro"; break; }
+        $lines = (int)($_POST['lines'] ?? 200);
+        if ($lines < 20)   $lines = 20;
+        if ($lines > 2000) $lines = 2000;
+        echo shell_exec("tail -n $lines " . escapeshellarg($logfile) . " 2>&1");
+        break;
+
+    case 'clearlog':
+        header('Content-Type: text/plain; charset=utf-8');
+        file_put_contents($logfile, "");
+        echo "Log cleared / Registro vaciado";
+        break;
+
     default:
         http_response_code(400);
         echo "unknown action";
 }
 ]]>
  </INLINE>
- <SHA256>aa037385d81c38589bb6d89d0a7913a419737cdacf2d9c5297614a3592b67061</SHA256>
+ <SHA256>af7c9ae9479f79b391992b45029e29189d45a76e61e3fffa997e38c394de2f62</SHA256>
 </FILE>
 
 <FILE Run="/bin/bash">
