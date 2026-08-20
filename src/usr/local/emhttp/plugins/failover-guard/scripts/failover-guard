@@ -294,6 +294,12 @@ maybe_replicate() {
 
 # ---- Watch loop ---------------------------------------------------------
 
+# The settings page reads this instead of running its own check: it shows what
+# the watcher actually sees, and costs nothing to display.
+publish_health() {
+    printf 'health=%s\nfails=%s\nchecked=%s\n' "$1" "$2" "$(date +%s)" > "$STATE/health"
+}
+
 watch_loop() {
     local fails=0 st
     log "Watcher started (every ${CHECK_INTERVAL}s, $FAIL_THRESHOLD failures to switch)"
@@ -304,6 +310,7 @@ watch_loop() {
         if [ "$ENABLED" != "yes" ]; then sleep "$CHECK_INTERVAL"; continue; fi
 
         origin_health; st=$?
+        publish_health "$st" "$fails"
 
         if [ -f "$STATE/switched" ]; then
             # Already switched: what we are waiting for now is the origin to
@@ -374,12 +381,16 @@ case "$MODE" in
                "$(watcher_running && tt running 'en marcha' || tt stopped parado)"
         ;;
     status)
+        health=""; fails=""; checked=""
+        [ -f "$STATE/health" ] && . "$STATE/health"
         jq -n --arg enabled "$ENABLED" \
               --arg watcher "$(watcher_running && echo running || echo stopped)" \
               --arg switched "$([ -f "$STATE/switched" ] && echo yes || echo no)" \
               --arg npm "$(npm_state)" \
               --arg last "$(cat "$STATE/last_replicate" 2>/dev/null || echo 0)" \
-              '{enabled:$enabled,watcher:$watcher,switched:$switched,npm_host:$npm,last_replicate:$last}'
+              --arg health "${health:-}" --arg fails "${fails:-0}" --arg checked "${checked:-0}" \
+              '{enabled:$enabled,watcher:$watcher,switched:$switched,npm_host:$npm,
+                last_replicate:$last,health:$health,fails:$fails,checked:$checked}'
         ;;
     *) echo "usage: $0 {watch|failover|failback|replicate|test|status}"; exit 1 ;;
 esac
