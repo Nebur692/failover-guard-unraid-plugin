@@ -1,3 +1,9 @@
+###2026.08.20.8
+- The watcher could die together with the shell that started it: setsid only
+  creates a new session when the caller is not already a process group leader, so
+  starting it by hand from a terminal left it attached to that terminal. Started
+  from cron it survived, which is why it went unnoticed. It now always forks.
+
 ###2026.08.20.7
 - A hook that refuses to run (because the site is busy and copying would capture
   a half-written state) left the copy pending, which meant it was retried on
