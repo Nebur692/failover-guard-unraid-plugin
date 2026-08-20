@@ -51,6 +51,13 @@ MODE="${1:-status}"
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG"; }
 
+# Follows the language picked in Unraid, for the things a person reads: the
+# checks output and the notifications. The log itself stays in English on
+# purpose — it is what gets pasted into a bug report.
+DYN_LOCALE=$(grep -oP '(?<=^locale=")[^"]*' /boot/config/plugins/dynamix/dynamix.cfg 2>/dev/null)
+case "$DYN_LOCALE" in es*) LANG_ES=1 ;; *) LANG_ES=0 ;; esac
+tt() { [ "$LANG_ES" = "1" ] && echo "$2" || echo "$1"; }
+
 notify() {
     [ "$NOTIFY" = "yes" ] || return 0
     local subject="$1" text="$2" icon="${3:-warning}"
@@ -222,22 +229,22 @@ do_failover() {
 
     if ! target_ready; then
         log "Failover target is not ready; refusing to switch"
-        notify "Failover NOT performed" "The failover target is not reachable or your dynamic DNS is stale." "alert"
+        notify "$(tt 'Failover NOT performed' 'Failover NO ejecutado')" "$(tt 'The failover target is not reachable or your dynamic DNS is stale.' 'El destino del failover no es alcanzable o tu DNS dinámico está desactualizado.')" "alert"
         return 1
     fi
 
     # Enable locally first: switching DNS onto a box that does not serve the
     # domain yet would hand users an error.
-    npm_enable || { notify "Failover failed" "Could not enable the NPM host." "alert"; return 1; }
+    npm_enable || { notify "$(tt 'Failover failed' 'Failover fallido')" "$(tt 'Could not enable the NPM host.' 'No se pudo habilitar el host de NPM.')" "alert"; return 1; }
 
     if dns_point_to "$FAILOVER_TARGET"; then
         date +%s > "$STATE/switched"
-        notify "Failover performed" "$DOMAIN now points to $FAILOVER_TARGET and is served from this server." "alert"
+        notify "$(tt 'Failover performed' 'Failover ejecutado')" "$(tt "$DOMAIN now points to $FAILOVER_TARGET and is served from this server." "$DOMAIN ahora apunta a $FAILOVER_TARGET y se sirve desde este servidor.")" "alert"
         return 0
     fi
 
     npm_disable
-    notify "Failover failed" "DNS could not be updated; the local host was left disabled so two copies never serve at once." "alert"
+    notify "$(tt 'Failover failed' 'Failover fallido')" "$(tt 'DNS could not be updated; the local host was left disabled so two copies never serve at once.' 'No se pudo cambiar el DNS; el host local se dejó deshabilitado para que nunca sirvan dos copias a la vez.')" "alert"
     return 1
 }
 
@@ -256,14 +263,14 @@ do_failback() {
     if ! run_hook "$HOOK_PRE_FAILBACK" "pre-failback"; then
         log "Data hook failed; keeping this box in service"
         npm_enable
-        notify "Failback aborted" "The pre-failback hook failed, so we keep serving locally rather than lose data." "alert"
+        notify "$(tt 'Failback aborted' 'Failback abortado')" "$(tt 'The pre-failback hook failed, so we keep serving locally rather than lose data.' 'El enganche previo al failback falló, así que se sigue sirviendo en local en vez de perder datos.')" "alert"
         return 1
     fi
 
     if dns_point_to "$ip"; then
         rm -f "$STATE/switched"
         date +%s > "$STATE/last_replicate"
-        notify "Failback complete" "$DOMAIN is served from the origin again ($ip). The local host is disabled." "normal"
+        notify "$(tt 'Failback complete' 'Failback completado')" "$(tt "$DOMAIN is served from the origin again ($ip). The local host is disabled." "$DOMAIN vuelve a servirse desde el origen ($ip). El host local queda deshabilitado.")" "normal"
         return 0
     fi
 
@@ -346,15 +353,24 @@ case "$MODE" in
     replicate) run_hook "$HOOK_REPLICATE" "replicate" && date +%s > "$STATE/last_replicate" ;;
     test)
         origin_health; h=$?
-        printf 'enabled:        %s\n' "$ENABLED"
-        printf 'local network:  %s\n' "$(local_net_ok && echo OK || echo FAIL)"
-        printf 'origin ports:   %s\n' "$(origin_ports_open && echo OK || echo FAIL)"
-        printf 'origin app:     %s\n' "$([ -z "$HEALTH_PATH" ] && echo "not configured" || (origin_app_ok && echo OK || echo FAIL))"
-        printf 'origin health:  %s\n' "$([ $h -eq 0 ] && echo HEALTHY || ([ $h -eq 2 ] && echo INCONCLUSIVE || echo DOWN))"
-        printf 'target ready:   %s\n' "$(target_ready && echo OK || echo FAIL)"
-        printf 'npm host:       %s\n' "$(npm_state)"
-        printf 'switched:       %s\n' "$([ -f "$STATE/switched" ] && echo yes || echo no)"
-        printf 'watcher:        %s\n' "$(watcher_running && echo running || echo stopped)"
+        w=22
+        printf "%-${w}s %s\n" "$(tt 'enabled:' 'activado:')" "$ENABLED"
+        printf "%-${w}s %s\n" "$(tt 'local network:' 'red local:')" \
+               "$(local_net_ok && echo OK || echo "$(tt FAIL FALLO)")"
+        printf "%-${w}s %s\n" "$(tt 'origin ports:' 'puertos del origen:')" \
+               "$(origin_ports_open && echo OK || echo "$(tt FAIL FALLO)")"
+        printf "%-${w}s %s\n" "$(tt 'origin app:' 'aplicación del origen:')" \
+               "$([ -z "$HEALTH_PATH" ] && tt 'not configured' 'sin configurar' || (origin_app_ok && echo OK || echo "$(tt FAIL FALLO)"))"
+        printf "%-${w}s %s\n" "$(tt 'origin health:' 'salud del origen:')" \
+               "$([ $h -eq 0 ] && tt HEALTHY SANO || ([ $h -eq 2 ] && tt INCONCLUSIVE 'NO CONCLUYENTE' || tt DOWN CAÍDO))"
+        printf "%-${w}s %s\n" "$(tt 'target ready:' 'destino listo:')" \
+               "$(target_ready && echo OK || echo "$(tt FAIL FALLO)")"
+        printf "%-${w}s %s\n" "$(tt 'npm host:' 'host de NPM:')" \
+               "$(s=$(npm_state); [ "$s" = "1" ] && tt 'enabled' 'habilitado' || { [ "$s" = "0" ] && tt 'disabled' 'deshabilitado' || echo "$s"; })"
+        printf "%-${w}s %s\n" "$(tt 'switched:' 'conmutado:')" \
+               "$([ -f "$STATE/switched" ] && tt yes sí || tt no no)"
+        printf "%-${w}s %s\n" "$(tt 'watcher:' 'vigilante:')" \
+               "$(watcher_running && tt running 'en marcha' || tt stopped parado)"
         ;;
     status)
         jq -n --arg enabled "$ENABLED" \
