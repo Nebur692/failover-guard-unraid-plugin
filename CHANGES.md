@@ -1,0 +1,18 @@
+###2026.08.20
+- First release. Watches a remote origin from your Unraid box and fails over
+  automatically when it dies: switches the Cloudflare DNS records of a zone to a
+  failover target and enables the matching Nginx Proxy Manager host, then returns
+  everything when the origin comes back.
+- Detection in about interval x threshold seconds (10s x 3 by default), not the
+  several minutes a cron job would take.
+- Three guards against false positives: a failure is not counted when this
+  server itself has no internet, an open port alone is not accepted as healthy
+  when a health path is configured, and a configurable number of consecutive
+  failures is required before anything is switched.
+- Refuses to switch when the failover target is not reachable or its dynamic DNS
+  has not caught up with the current public IP, since sending users nowhere is
+  worse than leaving the outage alone.
+- Your data is moved by your own hook scripts, never by the plugin. The
+  pre-failback hook runs with the local host already disabled, so nothing can be
+  written while the copy is in flight, and a failing hook aborts the failback
+  instead of losing whatever arrived during the outage.
