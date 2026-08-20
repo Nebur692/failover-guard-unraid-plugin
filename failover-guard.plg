@@ -3,7 +3,7 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "failover-guard">
 <!ENTITY author    "Nebur692">
-<!ENTITY version   "2026.08.20.6">
+<!ENTITY version   "2026.08.20.7">
 <!ENTITY launch    "Settings/FailoverGuard">
 <!ENTITY gitURL    "https://raw.githubusercontent.com/Nebur692/failover-guard-unraid-plugin/main">
 <!ENTITY pluginURL "&gitURL;/&name;.plg">
@@ -17,6 +17,13 @@
         min="6.12.0">
 
 <CHANGES>
+###2026.08.20.7
+- A hook that refuses to run (because the site is busy and copying would capture
+  a half-written state) left the copy pending, which meant it was retried on
+  every pass of the watcher — a connection to the origin every few seconds for as
+  long as the site stayed busy. There is now a configurable wait between retries,
+  60 seconds by default.
+
 ###2026.08.20.6
 - The per-field help is back to Unraid's own mechanism: plain blockquotes that
   the built-in Help button in the top bar unfolds, instead of the custom question
@@ -120,7 +127,7 @@ NPM_HOST_ID=""
 HOOK_REPLICATE=""             # runs while the origin is healthy: origin -> here
 HOOK_PRE_FAILBACK=""          # runs before returning: here -> origin
 REPLICATE_INTERVAL=3600
-QUIET_BEFORE_SYNC=0           # seconds your hook wants things idle (informational)
+RETRY_INTERVAL=60             # wait this long before retrying a hook that refused
 NOTIFY="yes"
 
 [ -f "$CONFIG" ] && . "$CONFIG"
@@ -361,12 +368,27 @@ do_failback() {
 
 maybe_replicate() {
     [ -z "$HOOK_REPLICATE" ] && return 0
-    local now prev
+    local now prev att
     now=$(date +%s)
+
+    # Time for the next scheduled copy?
     if [ -f "$STATE/last_replicate" ]; then
         prev=$(cat "$STATE/last_replicate")
         [ $((now - prev)) -lt "$REPLICATE_INTERVAL" ] && return 0
     fi
+
+    # A hook is allowed to refuse: the usual reason is that the site is busy right
+    # now and copying would capture a half-written state. When it refuses, the
+    # success mark is deliberately not updated, so the copy stays due — but
+    # without this backoff "still due" would mean retrying on every single pass of
+    # the watcher, which is every few seconds, hammering the origin for as long as
+    # the site stays busy.
+    if [ -f "$STATE/last_attempt" ]; then
+        att=$(cat "$STATE/last_attempt")
+        [ $((now - att)) -lt "$RETRY_INTERVAL" ] && return 0
+    fi
+    echo "$now" > "$STATE/last_attempt"
+
     if run_hook "$HOOK_REPLICATE" "replicate"; then
         echo "$now" > "$STATE/last_replicate"
     fi
@@ -476,7 +498,7 @@ case "$MODE" in
 esac
 ]]>
  </INLINE>
- <SHA256>b53468d7c0e43cfffb1b2327066634a18b2b610c2b132a460c13045bbc488c25</SHA256>
+ <SHA256>c578cfad2bc34a60ab4906f6c207af5eeb121881f2b52768556983cce3c5d85a</SHA256>
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/failover-guard/scripts/supervise" Mode="0755">
@@ -731,6 +753,12 @@ if ($stale) { $hlabel = t('no recent reading', 'sin lectura reciente'); $hclass 
 > <?= t('How often the replicate hook runs, in seconds. 3600 is once an hour. Whatever happened since the last copy is what you would lose in an outage, so shorter means less loss and more load on the origin.',
                    'Cada cuánto se ejecuta el enganche de réplica, en segundos. 3600 es una vez por hora. Lo ocurrido desde la última copia es lo que perderías en una caída, así que menos tiempo significa perder menos y cargar más el origen.') ?>
 
+**<?= t('Retry wait (s)', 'Espera entre reintentos (s)') ?>:**
+: <input type="number" name="RETRY_INTERVAL" min="10" value="<?= v($cfg,'RETRY_INTERVAL','60') ?>">
+
+> <?= t('A hook may refuse to run — typically because the site is busy right now and copying would capture a half-written state. When that happens the copy stays pending and is retried, and this is how long to wait between those retries. Without it the retry would happen on every pass of the watcher, hammering the origin for as long as the site stays busy.',
+       'Un enganche puede negarse a ejecutarse, normalmente porque el sitio está en uso justo en ese momento y copiar capturaría un estado a medio escribir. Cuando eso pasa, la copia queda pendiente y se reintenta, y esto es lo que se espera entre reintentos. Sin ello el reintento ocurriría en cada vuelta del vigilante, machacando el origen mientras el sitio siga en uso.') ?>
+
 **<?= t('Notifications', 'Notificaciones') ?>:**
 : <select name="NOTIFY">
   <option value="yes" <?= v($cfg,'NOTIFY','yes')=='yes' ? 'selected' : '' ?>><?= t('Yes','Sí') ?></option>
@@ -809,7 +837,7 @@ $(function() {
 </script>
 ]]>
  </INLINE>
- <SHA256>9c173a56eac1da3d643f7bd03f39c78fc9e3431ec164fbecc978a570914551d0</SHA256>
+ <SHA256>1d0f58edfd9ecebad6dc55bd1c8daab4281fc8147f3ad2e5890fdc7cbf70f7f6</SHA256>
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/failover-guard/include/action.php" Mode="0644">
@@ -882,6 +910,7 @@ NPM_HOST_ID=""
 HOOK_REPLICATE=""
 HOOK_PRE_FAILBACK=""
 REPLICATE_INTERVAL="3600"
+RETRY_INTERVAL="60"
 NOTIFY="yes"
 CFG
   chmod 600 &cfgdir;/config
