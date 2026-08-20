@@ -40,7 +40,7 @@ NPM_HOST_ID=""
 HOOK_REPLICATE=""             # runs while the origin is healthy: origin -> here
 HOOK_PRE_FAILBACK=""          # runs before returning: here -> origin
 REPLICATE_INTERVAL=3600
-QUIET_BEFORE_SYNC=0           # seconds your hook wants things idle (informational)
+RETRY_INTERVAL=60             # wait this long before retrying a hook that refused
 NOTIFY="yes"
 
 [ -f "$CONFIG" ] && . "$CONFIG"
@@ -281,12 +281,27 @@ do_failback() {
 
 maybe_replicate() {
     [ -z "$HOOK_REPLICATE" ] && return 0
-    local now prev
+    local now prev att
     now=$(date +%s)
+
+    # Time for the next scheduled copy?
     if [ -f "$STATE/last_replicate" ]; then
         prev=$(cat "$STATE/last_replicate")
         [ $((now - prev)) -lt "$REPLICATE_INTERVAL" ] && return 0
     fi
+
+    # A hook is allowed to refuse: the usual reason is that the site is busy right
+    # now and copying would capture a half-written state. When it refuses, the
+    # success mark is deliberately not updated, so the copy stays due — but
+    # without this backoff "still due" would mean retrying on every single pass of
+    # the watcher, which is every few seconds, hammering the origin for as long as
+    # the site stays busy.
+    if [ -f "$STATE/last_attempt" ]; then
+        att=$(cat "$STATE/last_attempt")
+        [ $((now - att)) -lt "$RETRY_INTERVAL" ] && return 0
+    fi
+    echo "$now" > "$STATE/last_attempt"
+
     if run_hook "$HOOK_REPLICATE" "replicate"; then
         echo "$now" > "$STATE/last_replicate"
     fi
