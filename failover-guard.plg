@@ -1,0 +1,722 @@
+<?xml version='1.0' standalone='yes'?>
+
+<!DOCTYPE PLUGIN [
+<!ENTITY name      "failover-guard">
+<!ENTITY author    "Nebur692">
+<!ENTITY version   "2026.08.20">
+<!ENTITY launch    "Settings/FailoverGuard">
+<!ENTITY gitURL    "https://raw.githubusercontent.com/Nebur692/failover-guard-unraid-plugin/main">
+<!ENTITY pluginURL "&gitURL;/&name;.plg">
+<!ENTITY plugdir   "/usr/local/emhttp/plugins/&name;">
+<!ENTITY cfgdir    "/boot/config/plugins/&name;">
+]>
+
+<PLUGIN name="&name;" author="&author;" version="&version;" launch="&launch;"
+        pluginURL="&pluginURL;"
+        support="https://github.com/Nebur692/failover-guard-unraid-plugin/issues"
+        min="6.12.0">
+
+<CHANGES>
+###2026.08.20
+- First release. Watches a remote origin from your Unraid box and fails over
+  automatically when it dies: switches the Cloudflare DNS records of a zone to a
+  failover target and enables the matching Nginx Proxy Manager host, then returns
+  everything when the origin comes back.
+- Detection in about interval x threshold seconds (10s x 3 by default), not the
+  several minutes a cron job would take.
+- Three guards against false positives: a failure is not counted when this
+  server itself has no internet, an open port alone is not accepted as healthy
+  when a health path is configured, and a configurable number of consecutive
+  failures is required before anything is switched.
+- Refuses to switch when the failover target is not reachable or its dynamic DNS
+  has not caught up with the current public IP, since sending users nowhere is
+  worse than leaving the outage alone.
+- Your data is moved by your own hook scripts, never by the plugin. The
+  pre-failback hook runs with the local host already disabled, so nothing can be
+  written while the copy is in flight, and a failing hook aborts the failback
+  instead of losing whatever arrived during the outage.
+</CHANGES>
+
+<FILE Name="/usr/local/emhttp/plugins/failover-guard/scripts/failover-guard" Mode="0755">
+ <INLINE>
+<![CDATA[
+#!/bin/bash
+# failover-guard — watches a remote origin and fails over to this Unraid box.
+#
+# Modes:
+#   watch     permanent loop, checks the origin every CHECK_INTERVAL seconds
+#   failover  switch DNS to the failover target and enable the NPM host
+#   failback  return DNS to the origin and disable the NPM host
+#   status    print current state as JSON (used by the settings page)
+#   test      run every check once and report, without changing anything
+#
+# The rule that governs the whole design: at any moment only ONE side accepts
+# writes. Data always moves from that side to the other, never both ways. The
+# plugin itself never touches your data — it calls your hook scripts for that,
+# because only you know what "your data" means.
+
+set -o pipefail
+
+PLUGIN="failover-guard"
+CONFIG="/boot/config/plugins/$PLUGIN/config"
+STATE="/boot/config/plugins/$PLUGIN/state"
+LOG="/var/log/$PLUGIN.log"
+
+mkdir -p "$STATE"
+
+# ---- Defaults, overridden by the config file ----------------------------
+
+ENABLED="no"
+ORIGIN_HOST=""                # host name of the remote origin (not the domain)
+ORIGIN_PORTS="443"            # space separated TCP ports that prove it is alive
+HEALTH_PATH=""                # optional: HTTP path on the origin, e.g. /api/health
+HEALTH_EXPECT=""              # optional: string the response must contain
+DOMAIN=""                     # Cloudflare zone / domain to switch
+FAILOVER_TARGET=""            # CNAME or IP that points at this box
+CF_TOKEN=""
+CHECK_INTERVAL=10
+FAIL_THRESHOLD=3
+NPM_DATA=""                   # e.g. /mnt/cache/appdata/NginxProxyManager/data
+NPM_CONTAINER="Nginx-Proxy-Manager-Official"
+NPM_HOST_ID=""
+HOOK_REPLICATE=""             # runs while the origin is healthy: origin -> here
+HOOK_PRE_FAILBACK=""          # runs before returning: here -> origin
+REPLICATE_INTERVAL=3600
+QUIET_BEFORE_SYNC=0           # seconds your hook wants things idle (informational)
+NOTIFY="yes"
+
+[ -f "$CONFIG" ] && . "$CONFIG"
+
+MODE="${1:-status}"
+
+# ---- Helpers ------------------------------------------------------------
+
+log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG"; }
+
+notify() {
+    [ "$NOTIFY" = "yes" ] || return 0
+    local subject="$1" text="$2" icon="${3:-warning}"
+    [ -x /usr/local/emhttp/webGui/scripts/notify ] && \
+        /usr/local/emhttp/webGui/scripts/notify -e "Failover Guard" \
+            -s "$subject" -d "$text" -i "$icon" >/dev/null 2>&1
+}
+
+cf_api() {
+    local method="$1" path="$2" data="$3"
+    if [ -n "$data" ]; then
+        curl -s -X "$method" -H "Authorization: Bearer $CF_TOKEN" \
+             -H "Content-Type: application/json" --data "$data" \
+             "https://api.cloudflare.com/client/v4$path"
+    else
+        curl -s -X "$method" -H "Authorization: Bearer $CF_TOKEN" \
+             "https://api.cloudflare.com/client/v4$path"
+    fi
+}
+
+cf_zone() { cf_api GET "/zones?name=$DOMAIN" | jq -r '.result[0].id'; }
+
+# ---- Health checks ------------------------------------------------------
+
+# Does this box have internet at all? If not, the origin may be perfectly fine
+# and we simply cannot see it — and failing over would be pointless anyway,
+# since nobody could reach us either.
+local_net_ok() {
+    local d
+    for d in 1.1.1.1 8.8.8.8; do
+        timeout 3 bash -c "echo > /dev/tcp/$d/443" 2>/dev/null && return 0
+    done
+    return 1
+}
+
+origin_ports_open() {
+    local p
+    for p in $ORIGIN_PORTS; do
+        timeout 6 bash -c "echo > /dev/tcp/$ORIGIN_HOST/$p" 2>/dev/null && return 0
+    done
+    return 1
+}
+
+# An open port only proves the machine booted. If HEALTH_PATH is set we ask the
+# application itself, hitting the origin by IP so we bypass any CDN in front —
+# otherwise the CDN would answer happily with the origin long dead.
+origin_app_ok() {
+    [ -z "$HEALTH_PATH" ] && return 0
+    local ip body
+    ip=$(getent hosts "$ORIGIN_HOST" | awk '{print $1}' | head -1)
+    [ -z "$ip" ] && return 1
+    body=$(timeout 8 curl -s --max-time 8 --resolve "$DOMAIN:443:$ip" \
+           "https://$DOMAIN$HEALTH_PATH" 2>/dev/null)
+    [ -z "$HEALTH_EXPECT" ] && { [ -n "$body" ] && return 0 || return 1; }
+    case "$body" in *"$HEALTH_EXPECT"*) return 0 ;; *) return 1 ;; esac
+}
+
+# 0 = healthy · 1 = down · 2 = inconclusive (our own network is broken)
+origin_health() {
+    local_net_ok || return 2
+    origin_ports_open || return 1
+    origin_app_ok || return 1
+    return 0
+}
+
+# Never send traffic to a failover target that is not ready: if your dynamic DNS
+# has not caught up, switching sends users nowhere. Worse than staying put.
+target_ready() {
+    [ -z "$FAILOVER_TARGET" ] && return 1
+    case "$FAILOVER_TARGET" in
+        *[a-zA-Z]*)
+            local ip_t ip_w
+            ip_t=$(getent hosts "$FAILOVER_TARGET" | awk '{print $1}' | head -1)
+            [ -z "$ip_t" ] && return 1
+            ip_w=$(timeout 8 curl -s https://api.ipify.org 2>/dev/null)
+            [ -z "$ip_w" ] && return 0
+            [ "$ip_t" = "$ip_w" ] && return 0
+            log "Failover target $FAILOVER_TARGET resolves to $ip_t but our public IP is $ip_w"
+            return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+# ---- Nginx Proxy Manager ------------------------------------------------
+#
+# Done the same way NPM does it internally: a disabled host keeps its .conf
+# with only the comment header. No API credentials needed.
+
+npm_conf() { echo "$NPM_DATA/nginx/proxy_host/${NPM_HOST_ID}.conf"; }
+npm_db()   { echo "$NPM_DATA/database.sqlite"; }
+
+npm_configured() { [ -n "$NPM_DATA" ] && [ -n "$NPM_HOST_ID" ] && [ -f "$(npm_db)" ]; }
+
+npm_state() {
+    npm_configured || { echo "n/a"; return; }
+    sqlite3 "$(npm_db)" "SELECT enabled FROM proxy_host WHERE id=$NPM_HOST_ID;" 2>/dev/null
+}
+
+npm_enable() {
+    npm_configured || return 0
+    [ "$(npm_state)" = "1" ] && return 0
+    if [ ! -s "$STATE/npm_host.conf" ]; then
+        log "No saved copy of the NPM host config; cannot enable it"
+        return 1
+    fi
+    cp "$STATE/npm_host.conf" "$(npm_conf)"
+    sqlite3 "$(npm_db)" "UPDATE proxy_host SET enabled=1 WHERE id=$NPM_HOST_ID;"
+    docker exec "$NPM_CONTAINER" nginx -s reload >/dev/null 2>&1
+    log "NPM host $NPM_HOST_ID enabled"
+}
+
+npm_disable() {
+    npm_configured || return 0
+    # Save the good config first: it is the only thing that lets us turn it back on.
+    [ -s "$(npm_conf)" ] && [ "$(wc -l < "$(npm_conf)")" -gt 4 ] && cp "$(npm_conf)" "$STATE/npm_host.conf"
+    [ "$(npm_state)" = "0" ] && return 0
+    printf '# ------------------------------------------------------------\n# %s\n# ------------------------------------------------------------\n' "$DOMAIN" > "$(npm_conf)"
+    sqlite3 "$(npm_db)" "UPDATE proxy_host SET enabled=0 WHERE id=$NPM_HOST_ID;"
+    docker exec "$NPM_CONTAINER" nginx -s reload >/dev/null 2>&1
+    log "NPM host $NPM_HOST_ID disabled"
+}
+
+# ---- DNS ----------------------------------------------------------------
+
+# Points every A/CNAME record of the zone at the given destination, keeping the
+# proxied flag each record already had.
+dns_point_to() {
+    local dest="$1" type zone records id name proxied res ok=0 bad=0
+    case "$dest" in *[a-zA-Z]*) type="CNAME" ;; *) type="A" ;; esac
+
+    zone=$(cf_zone)
+    if [ -z "$zone" ] || [ "$zone" = "null" ]; then
+        log "Cloudflare: could not read zone for $DOMAIN"
+        return 1
+    fi
+    records=$(cf_api GET "/zones/$zone/dns_records" \
+              | jq -r '.result[] | select(.type=="A" or .type=="CNAME") | "\(.id)|\(.name)|\(.proxied)"')
+
+    while IFS='|' read -r id name proxied; do
+        [ -z "$id" ] && continue
+        res=$(cf_api PUT "/zones/$zone/dns_records/$id" \
+              "{\"type\":\"$type\",\"name\":\"$name\",\"content\":\"$dest\",\"proxied\":$proxied,\"ttl\":1}" \
+              | jq -r .success)
+        if [ "$res" = "true" ]; then log "DNS: $name -> $type $dest"; ok=$((ok+1))
+        else log "DNS: failed to update $name"; bad=$((bad+1)); fi
+    done <<< "$records"
+
+    [ $ok -gt 0 ] && [ $bad -eq 0 ]
+}
+
+origin_ip() { getent hosts "$ORIGIN_HOST" | awk '{print $1}' | head -1; }
+
+# ---- Actions ------------------------------------------------------------
+
+run_hook() {
+    local hook="$1" label="$2"
+    [ -z "$hook" ] && return 0
+    [ -f "$hook" ] || { log "Hook $label not found: $hook"; return 1; }
+    log "Running $label hook: $hook"
+    if bash "$hook" >> "$LOG" 2>&1; then
+        log "$label hook finished OK"; return 0
+    fi
+    log "$label hook FAILED"; return 1
+}
+
+do_failover() {
+    [ -f "$STATE/switched" ] && return 0
+    log "FAILOVER: origin is down, serving from this box"
+
+    if ! target_ready; then
+        log "Failover target is not ready; refusing to switch"
+        notify "Failover NOT performed" "The failover target is not reachable or your dynamic DNS is stale." "alert"
+        return 1
+    fi
+
+    # Enable locally first: switching DNS onto a box that does not serve the
+    # domain yet would hand users an error.
+    npm_enable || { notify "Failover failed" "Could not enable the NPM host." "alert"; return 1; }
+
+    if dns_point_to "$FAILOVER_TARGET"; then
+        date +%s > "$STATE/switched"
+        notify "Failover performed" "$DOMAIN now points to $FAILOVER_TARGET and is served from this server." "alert"
+        return 0
+    fi
+
+    npm_disable
+    notify "Failover failed" "DNS could not be updated; the local host was left disabled so two copies never serve at once." "alert"
+    return 1
+}
+
+do_failback() {
+    [ -f "$STATE/switched" ] || return 0
+    local ip
+    ip=$(origin_ip)
+    [ -z "$ip" ] && { log "Cannot resolve the origin; failback aborted"; return 1; }
+
+    log "FAILBACK: origin is back. Freezing this box before moving data"
+
+    # Freeze first: from here on nobody writes on this side, so whatever the
+    # hook uploads is the complete, final picture.
+    npm_disable
+
+    if ! run_hook "$HOOK_PRE_FAILBACK" "pre-failback"; then
+        log "Data hook failed; keeping this box in service"
+        npm_enable
+        notify "Failback aborted" "The pre-failback hook failed, so we keep serving locally rather than lose data." "alert"
+        return 1
+    fi
+
+    if dns_point_to "$ip"; then
+        rm -f "$STATE/switched"
+        date +%s > "$STATE/last_replicate"
+        notify "Failback complete" "$DOMAIN is served from the origin again ($ip). The local host is disabled." "normal"
+        return 0
+    fi
+
+    log "DNS could not be updated; keeping this box in service"
+    npm_enable
+    return 1
+}
+
+maybe_replicate() {
+    [ -z "$HOOK_REPLICATE" ] && return 0
+    local now prev
+    now=$(date +%s)
+    if [ -f "$STATE/last_replicate" ]; then
+        prev=$(cat "$STATE/last_replicate")
+        [ $((now - prev)) -lt "$REPLICATE_INTERVAL" ] && return 0
+    fi
+    if run_hook "$HOOK_REPLICATE" "replicate"; then
+        echo "$now" > "$STATE/last_replicate"
+    fi
+}
+
+# ---- Watch loop ---------------------------------------------------------
+
+watch_loop() {
+    local fails=0 st
+    log "Watcher started (every ${CHECK_INTERVAL}s, $FAIL_THRESHOLD failures to switch)"
+    echo $$ > "$STATE/watcher.pid"
+    trap 'rm -f "$STATE/watcher.pid"; exit 0' TERM INT
+
+    while true; do
+        if [ "$ENABLED" != "yes" ]; then sleep "$CHECK_INTERVAL"; continue; fi
+
+        origin_health; st=$?
+
+        if [ -f "$STATE/switched" ]; then
+            # Already switched: what we are waiting for now is the origin to
+            # come back, and then the failback.
+            if [ $st -eq 0 ]; then
+                fails=$((fails+1))
+                if [ $fails -ge $FAIL_THRESHOLD ]; then do_failback; fails=0; sleep 60; fi
+            else
+                fails=0
+            fi
+            sleep "$CHECK_INTERVAL"; continue
+        fi
+
+        case $st in
+            0) [ $fails -gt 0 ] && log "Origin responding again (discarding $fails failures)"
+               fails=0
+               maybe_replicate ;;
+            2) [ $fails -gt 0 ] && log "No internet on this box: not counting the failure"
+               fails=0 ;;
+            1) fails=$((fails+1))
+               log "Origin not responding (failure $fails of $FAIL_THRESHOLD)"
+               if [ $fails -ge $FAIL_THRESHOLD ]; then
+                   if [ -n "$HOOK_REPLICATE" ] && [ ! -f "$STATE/last_replicate" ]; then
+                       log "No replica has ever run: refusing to switch to an empty copy"
+                   else
+                       do_failover
+                   fi
+                   fails=0; sleep 60
+               fi ;;
+        esac
+        sleep "$CHECK_INTERVAL"
+    done
+}
+
+watcher_running() {
+    local pid
+    pid=$(cat "$STATE/watcher.pid" 2>/dev/null)
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
+# ---- Entry point --------------------------------------------------------
+
+case "$MODE" in
+    watch)    watch_loop ;;
+    failover) do_failover ;;
+    failback) do_failback ;;
+    replicate) run_hook "$HOOK_REPLICATE" "replicate" && date +%s > "$STATE/last_replicate" ;;
+    test)
+        origin_health; h=$?
+        printf 'enabled:        %s\n' "$ENABLED"
+        printf 'local network:  %s\n' "$(local_net_ok && echo OK || echo FAIL)"
+        printf 'origin ports:   %s\n' "$(origin_ports_open && echo OK || echo FAIL)"
+        printf 'origin app:     %s\n' "$([ -z "$HEALTH_PATH" ] && echo "not configured" || (origin_app_ok && echo OK || echo FAIL))"
+        printf 'origin health:  %s\n' "$([ $h -eq 0 ] && echo HEALTHY || ([ $h -eq 2 ] && echo INCONCLUSIVE || echo DOWN))"
+        printf 'target ready:   %s\n' "$(target_ready && echo OK || echo FAIL)"
+        printf 'npm host:       %s\n' "$(npm_state)"
+        printf 'switched:       %s\n' "$([ -f "$STATE/switched" ] && echo yes || echo no)"
+        printf 'watcher:        %s\n' "$(watcher_running && echo running || echo stopped)"
+        ;;
+    status)
+        jq -n --arg enabled "$ENABLED" \
+              --arg watcher "$(watcher_running && echo running || echo stopped)" \
+              --arg switched "$([ -f "$STATE/switched" ] && echo yes || echo no)" \
+              --arg npm "$(npm_state)" \
+              --arg last "$(cat "$STATE/last_replicate" 2>/dev/null || echo 0)" \
+              '{enabled:$enabled,watcher:$watcher,switched:$switched,npm_host:$npm,last_replicate:$last}'
+        ;;
+    *) echo "usage: $0 {watch|failover|failback|replicate|test|status}"; exit 1 ;;
+esac
+]]>
+ </INLINE>
+ <SHA256>db4ca5e2ae40b6984123baa46c4c95db10089427353f9310495505c84b8abcc9</SHA256>
+</FILE>
+
+<FILE Name="/usr/local/emhttp/plugins/failover-guard/scripts/supervise" Mode="0755">
+ <INLINE>
+<![CDATA[
+#!/bin/bash
+# Keeps the watcher alive. Runs from cron every few minutes, so the watcher
+# survives a crash, an array restart or a plugin update without anyone noticing.
+
+PLUGIN="failover-guard"
+BASE="/usr/local/emhttp/plugins/$PLUGIN"
+STATE="/boot/config/plugins/$PLUGIN/state"
+CONFIG="/boot/config/plugins/$PLUGIN/config"
+LOG="/var/log/$PLUGIN.log"
+
+ENABLED="no"
+[ -f "$CONFIG" ] && . "$CONFIG"
+
+mkdir -p "$STATE"
+
+pid=$(cat "$STATE/watcher.pid" 2>/dev/null)
+
+if [ "$ENABLED" != "yes" ]; then
+    # Disabled on purpose: stop the watcher if it is still around.
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        kill "$pid" 2>/dev/null
+        echo "$(date '+%Y-%m-%d %H:%M:%S') Watcher stopped (plugin disabled)" >> "$LOG"
+    fi
+    rm -f "$STATE/watcher.pid"
+    exit 0
+fi
+
+if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then exit 0; fi
+
+setsid nohup bash "$BASE/scripts/failover-guard" watch >/dev/null 2>&1 &
+echo "$(date '+%Y-%m-%d %H:%M:%S') Watcher started by supervisor" >> "$LOG"
+]]>
+ </INLINE>
+ <SHA256>636bf1aceee1e574f93391af5f00b0a7dd203ccf05da80fcd4b871e9bb5c271c</SHA256>
+</FILE>
+
+<FILE Name="/usr/local/emhttp/plugins/failover-guard/FailoverGuard.page" Mode="0644">
+ <INLINE>
+<![CDATA[
+Menu="Utilities"
+Title="Failover Guard"
+Icon="fa-exchange"
+---
+<?php
+/* Failover Guard — settings page.
+   Bilingual on purpose: this box is used by people who read either language. */
+
+$plugin  = "failover-guard";
+$cfgfile = "/boot/config/plugins/$plugin/config";
+$script  = "/usr/local/emhttp/plugins/$plugin/scripts/failover-guard";
+
+$cfg = file_exists($cfgfile) ? parse_ini_file($cfgfile) : [];
+function v($cfg, $k, $d = "") { return htmlspecialchars($cfg[$k] ?? $d); }
+
+$status = json_decode(shell_exec("bash " . escapeshellarg($script) . " status 2>/dev/null"), true) ?: [];
+$switched = ($status['switched'] ?? 'no') === 'yes';
+$watcher  = $status['watcher'] ?? 'stopped';
+?>
+
+<style>
+.fg-state { padding:6px 10px; border-radius:4px; display:inline-block; margin-right:8px; }
+.fg-ok    { background:#1a7f37; color:#fff; }
+.fg-warn  { background:#9a6700; color:#fff; }
+.fg-bad   { background:#b32d2e; color:#fff; }
+.fg-note  { opacity:.75; font-size:.9em; }
+</style>
+
+<div style="margin-bottom:14px">
+  <span class="fg-state <?= $watcher === 'running' ? 'fg-ok' : 'fg-bad' ?>">
+    Watcher: <?= $watcher ?>
+  </span>
+  <span class="fg-state <?= $switched ? 'fg-warn' : 'fg-ok' ?>">
+    <?= $switched ? 'FAILED OVER — serving locally / CONMUTADO — sirviendo en local'
+                  : 'Normal — origin is serving / Normal — sirve el origen' ?>
+  </span>
+</div>
+
+<form markdown="1" method="POST" action="/update.htm" target="progressFrame">
+<input type="hidden" name="#file" value="<?= $plugin ?>/config">
+
+**Enable failover / Activar el failover:**
+: <select name="ENABLED">
+  <option value="no"  <?= v($cfg,'ENABLED','no')=='no'  ? 'selected' : '' ?>>No</option>
+  <option value="yes" <?= v($cfg,'ENABLED','no')=='yes' ? 'selected' : '' ?>>Yes / Sí</option>
+  </select>
+
+> While this is off the watcher stays stopped and nothing is ever switched.
+> Mientras esté en No, el vigilante no arranca y nunca se conmuta nada.
+
+### Origin / Origen
+
+**Origin host / Host del origen:**
+: <input type="text" name="ORIGIN_HOST" value="<?= v($cfg,'ORIGIN_HOST') ?>" placeholder="vps.example.com">
+
+> The real host name of the remote server, NOT the public domain. If your domain
+> sits behind a CDN it answers even when the origin is dead, so it is useless here.
+> El nombre real del servidor remoto, NO el dominio público: si el dominio pasa por
+> un CDN, responde aunque el origen esté muerto y no sirve para vigilar.
+
+**TCP ports to probe / Puertos TCP a sondear:**
+: <input type="text" name="ORIGIN_PORTS" value="<?= v($cfg,'ORIGIN_PORTS','443') ?>" placeholder="22 443">
+
+**Health path / Ruta de salud:**
+: <input type="text" name="HEALTH_PATH" value="<?= v($cfg,'HEALTH_PATH') ?>" placeholder="/api/health">
+
+> Optional but strongly recommended: an open port only proves the machine booted,
+> not that the site works. Left empty, only ports are checked.
+> Opcional pero muy recomendable: un puerto abierto solo demuestra que la máquina
+> arrancó, no que el sitio funcione. Vacío, solo se comprueban los puertos.
+
+**Expected in response / Se espera en la respuesta:**
+: <input type="text" name="HEALTH_EXPECT" value="<?= v($cfg,'HEALTH_EXPECT') ?>" placeholder='"ok":true'>
+
+### Switching / Conmutación
+
+**Domain / Dominio:**
+: <input type="text" name="DOMAIN" value="<?= v($cfg,'DOMAIN') ?>" placeholder="example.com">
+
+**Failover target / Destino del failover:**
+: <input type="text" name="FAILOVER_TARGET" value="<?= v($cfg,'FAILOVER_TARGET') ?>" placeholder="home.example.com">
+
+> A host name (becomes a CNAME) or an IP (becomes an A record) pointing at this
+> box. A dynamic DNS name with a short TTL works best.
+> Un nombre de host (se pone como CNAME) o una IP (registro A) que apunte a este
+> servidor. Lo ideal es un nombre de DNS dinámico con TTL corto.
+
+**Cloudflare API token / Token de API de Cloudflare:**
+: <input type="password" name="CF_TOKEN" value="<?= v($cfg,'CF_TOKEN') ?>">
+
+> Needs Zone:Read and DNS:Edit on that zone only.
+> Necesita Zone:Read y DNS:Edit únicamente sobre esa zona.
+
+**Check interval (s) / Intervalo de comprobación (s):**
+: <input type="number" name="CHECK_INTERVAL" min="5" max="600" value="<?= v($cfg,'CHECK_INTERVAL','10') ?>">
+
+**Failures before switching / Fallos antes de conmutar:**
+: <input type="number" name="FAIL_THRESHOLD" min="1" max="20" value="<?= v($cfg,'FAIL_THRESHOLD','3') ?>">
+
+> Detection time is roughly interval × failures. Three failures avoids switching
+> on a passing network blip.
+> El tiempo de detección es aproximadamente intervalo × fallos. Tres fallos evitan
+> conmutar por un bache de red pasajero.
+
+### Nginx Proxy Manager (optional / opcional)
+
+**NPM data path / Ruta de datos de NPM:**
+: <input type="text" name="NPM_DATA" value="<?= v($cfg,'NPM_DATA') ?>" placeholder="/mnt/user/appdata/NginxProxyManager/data">
+
+**NPM container / Contenedor de NPM:**
+: <input type="text" name="NPM_CONTAINER" value="<?= v($cfg,'NPM_CONTAINER','Nginx-Proxy-Manager-Official') ?>">
+
+**Proxy host ID / ID del proxy host:**
+: <input type="text" name="NPM_HOST_ID" value="<?= v($cfg,'NPM_HOST_ID') ?>" placeholder="65">
+
+> The local host stays disabled while the origin is healthy, so two copies never
+> accept writes at the same time. It is enabled only during a failover.
+> El host local permanece deshabilitado mientras el origen está sano, para que
+> nunca haya dos copias aceptando escrituras. Solo se habilita durante un failover.
+
+### Data hooks / Enganches de datos
+
+**Replicate hook / Enganche de réplica:**
+: <input type="text" name="HOOK_REPLICATE" value="<?= v($cfg,'HOOK_REPLICATE') ?>" placeholder="/boot/config/plugins/failover-guard/replicate.sh">
+
+**Pre-failback hook / Enganche previo al failback:**
+: <input type="text" name="HOOK_PRE_FAILBACK" value="<?= v($cfg,'HOOK_PRE_FAILBACK') ?>" placeholder="/boot/config/plugins/failover-guard/failback.sh">
+
+> This plugin never touches your data — only you know what your data is. The
+> replicate hook copies origin → here while all is well. The pre-failback hook
+> copies here → origin before returning, and it runs with the local host already
+> disabled, so nothing can be written mid-copy. If it fails, the failback is
+> aborted and this box keeps serving.
+> El plugin no toca tus datos: solo tú sabes cuáles son. El enganche de réplica
+> copia origen → aquí mientras todo va bien. El de pre-failback copia aquí →
+> origen antes de volver, y se ejecuta con el host local ya deshabilitado, así que
+> nada puede escribirse a mitad de copia. Si falla, el failback se aborta y este
+> servidor sigue sirviendo.
+
+**Replicate interval (s) / Intervalo de réplica (s):**
+: <input type="number" name="REPLICATE_INTERVAL" min="300" value="<?= v($cfg,'REPLICATE_INTERVAL','3600') ?>">
+
+**Notifications / Notificaciones:**
+: <select name="NOTIFY">
+  <option value="yes" <?= v($cfg,'NOTIFY','yes')=='yes' ? 'selected' : '' ?>>Yes / Sí</option>
+  <option value="no"  <?= v($cfg,'NOTIFY','yes')=='no'  ? 'selected' : '' ?>>No</option>
+  </select>
+
+&nbsp;
+: <input type="submit" value="Apply / Aplicar"><input type="button" value="Done / Hecho" onclick="done()">
+
+</form>
+
+### Checks / Comprobaciones
+
+<pre id="fgtest" style="max-height:260px;overflow:auto">Press the button to run every check without changing anything.
+Pulsa el botón para ejecutar todas las comprobaciones sin cambiar nada.</pre>
+
+<input type="button" value="Run checks / Comprobar" onclick="fgTest()">
+
+<script>
+function fgTest() {
+  document.getElementById('fgtest').textContent = 'Running… / Comprobando…';
+  $.post('/plugins/<?= $plugin ?>/include/action.php', {action:'test'}, function(d) {
+    document.getElementById('fgtest').textContent = d;
+  });
+}
+</script>
+
+> Log: `/var/log/<?= $plugin ?>.log`
+]]>
+ </INLINE>
+ <SHA256>2fedcca770415266d4408d1154b0bd5f83ea6dd6a3f50eab34c4871fea1a20ac</SHA256>
+</FILE>
+
+<FILE Name="/usr/local/emhttp/plugins/failover-guard/include/action.php" Mode="0644">
+ <INLINE>
+<![CDATA[
+<?php
+/* Actions triggered from the settings page.
+   Only read-only checks are exposed here on purpose: switching over is the
+   watcher's job, and a stray click should never move a live site. */
+
+$script = "/usr/local/emhttp/plugins/failover-guard/scripts/failover-guard";
+$action = $_POST['action'] ?? '';
+
+switch ($action) {
+    case 'test':
+        header('Content-Type: text/plain; charset=utf-8');
+        echo shell_exec("bash " . escapeshellarg($script) . " test 2>&1");
+        break;
+    case 'status':
+        header('Content-Type: application/json; charset=utf-8');
+        echo shell_exec("bash " . escapeshellarg($script) . " status 2>&1");
+        break;
+    default:
+        http_response_code(400);
+        echo "unknown action";
+}
+]]>
+ </INLINE>
+ <SHA256>aa037385d81c38589bb6d89d0a7913a419737cdacf2d9c5297614a3592b67061</SHA256>
+</FILE>
+
+<FILE Run="/bin/bash">
+<INLINE>
+mkdir -p &cfgdir;/state
+
+# Seed a config on first install so the page has something to read.
+if [ ! -f &cfgdir;/config ]; then
+  cat &gt; &cfgdir;/config &lt;&lt;'CFG'
+ENABLED="no"
+ORIGIN_HOST=""
+ORIGIN_PORTS="443"
+HEALTH_PATH=""
+HEALTH_EXPECT=""
+DOMAIN=""
+FAILOVER_TARGET=""
+CF_TOKEN=""
+CHECK_INTERVAL="10"
+FAIL_THRESHOLD="3"
+NPM_DATA=""
+NPM_CONTAINER="Nginx-Proxy-Manager-Official"
+NPM_HOST_ID=""
+HOOK_REPLICATE=""
+HOOK_PRE_FAILBACK=""
+REPLICATE_INTERVAL="3600"
+NOTIFY="yes"
+CFG
+  chmod 600 &cfgdir;/config
+fi
+
+# The watcher is a long-lived process; this keeps it alive across crashes,
+# array restarts and plugin updates.
+cat &gt; /etc/cron.d/&name; &lt;&lt;'CRON'
+*/5 * * * * root /usr/local/emhttp/plugins/failover-guard/scripts/supervise >/dev/null 2>&amp;1
+CRON
+[ -x /usr/local/sbin/update_cron ] &amp;&amp; /usr/local/sbin/update_cron
+
+&plugdir;/scripts/supervise >/dev/null 2>&amp;1 || true
+
+echo ""
+echo "----------------------------------------------------"
+echo " failover-guard has been installed."
+echo " Configure it at Settings -&gt; Failover Guard."
+echo " Version: &version;"
+echo "----------------------------------------------------"
+echo ""
+</INLINE>
+</FILE>
+
+<FILE Run="/bin/bash" Method="remove">
+<INLINE>
+PID=$(cat &cfgdir;/state/watcher.pid 2>/dev/null)
+[ -n "$PID" ] &amp;&amp; kill "$PID" 2>/dev/null
+rm -f /etc/cron.d/&name;
+[ -x /usr/local/sbin/update_cron ] &amp;&amp; /usr/local/sbin/update_cron
+rm -rf &plugdir;
+echo ""
+echo " failover-guard removed. Settings kept in &cfgdir;"
+echo ""
+</INLINE>
+</FILE>
+
+</PLUGIN>
