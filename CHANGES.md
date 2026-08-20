@@ -1,3 +1,11 @@
+###2026.08.20.5
+- The origin health is now the first and biggest thing on the page, on the same
+  row as the rest of the state instead of dropped onto its own line below it.
+- Every field has a "?" next to its label that unfolds a plain-language
+  explanation of what it does and what happens if you get it wrong. The previous
+  notes only showed up if you found the global help toggle, and several fields
+  had no explanation at all.
+
 ###2026.08.20.4
 - The settings page now shows what the watcher is seeing: origin healthy, origin
   down, or inconclusive because this server itself has no internet, plus the
