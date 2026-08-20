@@ -3,7 +3,7 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "failover-guard">
 <!ENTITY author    "Nebur692">
-<!ENTITY version   "2026.08.20.7">
+<!ENTITY version   "2026.08.20.8">
 <!ENTITY launch    "Settings/FailoverGuard">
 <!ENTITY gitURL    "https://raw.githubusercontent.com/Nebur692/failover-guard-unraid-plugin/main">
 <!ENTITY pluginURL "&gitURL;/&name;.plg">
@@ -17,6 +17,12 @@
         min="6.12.0">
 
 <CHANGES>
+###2026.08.20.8
+- The watcher could die together with the shell that started it: setsid only
+  creates a new session when the caller is not already a process group leader, so
+  starting it by hand from a terminal left it attached to that terminal. Started
+  from cron it survived, which is why it went unnoticed. It now always forks.
+
 ###2026.08.20.7
 - A hook that refuses to run (because the site is busy and copying would capture
   a half-written state) left the copy pending, which meant it was retried on
@@ -533,11 +539,16 @@ fi
 
 if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then exit 0; fi
 
-setsid nohup bash "$BASE/scripts/failover-guard" watch >/dev/null 2>&1 &
+# --fork is not optional: without it setsid only creates a new session when the
+# caller is not already a process group leader, so launching this from an
+# interactive shell leaves the watcher in that shell's group and it dies with it.
+# Started from cron it happened to survive, which is exactly the kind of bug that
+# only shows up for whoever runs it by hand.
+setsid --fork bash "$BASE/scripts/failover-guard" watch >/dev/null 2>&1 < /dev/null &
 echo "$(date '+%Y-%m-%d %H:%M:%S') Watcher started by supervisor" >> "$LOG"
 ]]>
  </INLINE>
- <SHA256>636bf1aceee1e574f93391af5f00b0a7dd203ccf05da80fcd4b871e9bb5c271c</SHA256>
+ <SHA256>751dbea6c51e6a08669bf243f61a707cce81f725dd463df1301363e4d1c1b8e8</SHA256>
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/failover-guard/FailoverGuard.page" Mode="0644">
