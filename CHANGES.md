@@ -1,3 +1,12 @@
+###2026.08.20.4
+- The settings page now shows what the watcher is seeing: origin healthy, origin
+  down, or inconclusive because this server itself has no internet, plus the
+  consecutive failure count and how many seconds ago it was checked. Until now
+  that only appeared if you pressed the check button. The value is published by
+  the watcher rather than probed on page load, so the page is instant and always
+  agrees with what the watcher is acting on, and it is shown as "no recent
+  reading" if the watcher stopped updating it.
+
 ###2026.08.20.3
 - The "enabled" line in the checks output showed the raw yes/no from the config
   file instead of the translated word.
