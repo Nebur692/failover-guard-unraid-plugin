@@ -158,13 +158,57 @@ Pulsa el botón para ejecutar todas las comprobaciones sin cambiar nada.</pre>
 
 <input type="button" value="Run checks / Comprobar" onclick="fgTest()">
 
+### Log / Registro
+
+<pre id="fglog" style="max-height:420px;overflow:auto">Loading… / Cargando…</pre>
+
+<input type="button" value="Refresh / Actualizar" onclick="fgLog()">
+<input type="button" value="Clear / Vaciar" onclick="fgClear()">
+<label><input type="checkbox" id="fgauto" onchange="fgAuto()"> Auto-refresh (5s) / Auto-actualizar (5s)</label>
+<select id="fglines" onchange="fgLog()">
+  <option value="100">100</option>
+  <option value="200" selected>200</option>
+  <option value="500">500</option>
+  <option value="2000">2000</option>
+</select>
+
+> Full file / Fichero completo: `/var/log/<?= $plugin ?>.log`
+
 <script>
+var fgTimer = null;
+
 function fgTest() {
   document.getElementById('fgtest').textContent = 'Running… / Comprobando…';
   $.post('/plugins/<?= $plugin ?>/include/action.php', {action:'test'}, function(d) {
     document.getElementById('fgtest').textContent = d;
   });
 }
-</script>
 
-> Log: `/var/log/<?= $plugin ?>.log`
+function fgLog() {
+  var n = document.getElementById('fglines').value;
+  $.post('/plugins/<?= $plugin ?>/include/action.php', {action:'log', lines:n}, function(d) {
+    var box = document.getElementById('fglog');
+    // Keep the newest lines in view: that is what you came to read.
+    var stuck = (box.scrollTop + box.clientHeight >= box.scrollHeight - 30);
+    box.textContent = d;
+    if (stuck) box.scrollTop = box.scrollHeight;
+  });
+}
+
+function fgClear() {
+  $.post('/plugins/<?= $plugin ?>/include/action.php', {action:'clearlog'}, function() { fgLog(); });
+}
+
+function fgAuto() {
+  if (document.getElementById('fgauto').checked) {
+    fgTimer = setInterval(fgLog, 5000);
+  } else {
+    clearInterval(fgTimer); fgTimer = null;
+  }
+}
+
+$(function() {
+  fgLog();
+  document.getElementById('fglog').scrollTop = document.getElementById('fglog').scrollHeight;
+});
+</script>
