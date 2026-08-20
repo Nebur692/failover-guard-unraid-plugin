@@ -1,3 +1,8 @@
+###2026.08.20.6
+- The per-field help is back to Unraid's own mechanism: plain blockquotes that
+  the built-in Help button in the top bar unfolds, instead of the custom question
+  mark widget added in .5, which was not how Unraid does this.
+
 ###2026.08.20.5
 - The origin health is now the first and biggest thing on the page, on the same
   row as the rest of the state instead of dropped onto its own line below it.
