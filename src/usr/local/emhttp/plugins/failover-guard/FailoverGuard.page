@@ -208,6 +208,12 @@ if ($stale) { $hlabel = t('no recent reading', 'sin lectura reciente'); $hclass 
 > <?= t('How often the replicate hook runs, in seconds. 3600 is once an hour. Whatever happened since the last copy is what you would lose in an outage, so shorter means less loss and more load on the origin.',
                    'Cada cuánto se ejecuta el enganche de réplica, en segundos. 3600 es una vez por hora. Lo ocurrido desde la última copia es lo que perderías en una caída, así que menos tiempo significa perder menos y cargar más el origen.') ?>
 
+**<?= t('Retry wait (s)', 'Espera entre reintentos (s)') ?>:**
+: <input type="number" name="RETRY_INTERVAL" min="10" value="<?= v($cfg,'RETRY_INTERVAL','60') ?>">
+
+> <?= t('A hook may refuse to run — typically because the site is busy right now and copying would capture a half-written state. When that happens the copy stays pending and is retried, and this is how long to wait between those retries. Without it the retry would happen on every pass of the watcher, hammering the origin for as long as the site stays busy.',
+       'Un enganche puede negarse a ejecutarse, normalmente porque el sitio está en uso justo en ese momento y copiar capturaría un estado a medio escribir. Cuando eso pasa, la copia queda pendiente y se reintenta, y esto es lo que se espera entre reintentos. Sin ello el reintento ocurriría en cada vuelta del vigilante, machacando el origen mientras el sitio siga en uso.') ?>
+
 **<?= t('Notifications', 'Notificaciones') ?>:**
 : <select name="NOTIFY">
   <option value="yes" <?= v($cfg,'NOTIFY','yes')=='yes' ? 'selected' : '' ?>><?= t('Yes','Sí') ?></option>
