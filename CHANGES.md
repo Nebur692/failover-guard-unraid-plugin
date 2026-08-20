@@ -1,3 +1,10 @@
+###2026.08.20.7
+- A hook that refuses to run (because the site is busy and copying would capture
+  a half-written state) left the copy pending, which meant it was retried on
+  every pass of the watcher — a connection to the origin every few seconds for as
+  long as the site stayed busy. There is now a configurable wait between retries,
+  60 seconds by default.
+
 ###2026.08.20.6
 - The per-field help is back to Unraid's own mechanism: plain blockquotes that
   the built-in Help button in the top bar unfolds, instead of the custom question
