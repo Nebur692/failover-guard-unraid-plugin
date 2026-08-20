@@ -1,0 +1,31 @@
+#!/bin/bash
+# Keeps the watcher alive. Runs from cron every few minutes, so the watcher
+# survives a crash, an array restart or a plugin update without anyone noticing.
+
+PLUGIN="failover-guard"
+BASE="/usr/local/emhttp/plugins/$PLUGIN"
+STATE="/boot/config/plugins/$PLUGIN/state"
+CONFIG="/boot/config/plugins/$PLUGIN/config"
+LOG="/var/log/$PLUGIN.log"
+
+ENABLED="no"
+[ -f "$CONFIG" ] && . "$CONFIG"
+
+mkdir -p "$STATE"
+
+pid=$(cat "$STATE/watcher.pid" 2>/dev/null)
+
+if [ "$ENABLED" != "yes" ]; then
+    # Disabled on purpose: stop the watcher if it is still around.
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        kill "$pid" 2>/dev/null
+        echo "$(date '+%Y-%m-%d %H:%M:%S') Watcher stopped (plugin disabled)" >> "$LOG"
+    fi
+    rm -f "$STATE/watcher.pid"
+    exit 0
+fi
+
+if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then exit 0; fi
+
+setsid nohup bash "$BASE/scripts/failover-guard" watch >/dev/null 2>&1 &
+echo "$(date '+%Y-%m-%d %H:%M:%S') Watcher started by supervisor" >> "$LOG"
