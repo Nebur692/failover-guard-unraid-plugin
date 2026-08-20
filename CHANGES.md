@@ -1,3 +1,7 @@
+###2026.08.20.3
+- The "enabled" line in the checks output showed the raw yes/no from the config
+  file instead of the translated word.
+
 ###2026.08.20.2
 - The settings page, the checks output and the notifications now follow the
   language selected in Unraid (Settings -> Display Settings), instead of showing
