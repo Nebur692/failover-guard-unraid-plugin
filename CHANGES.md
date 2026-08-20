@@ -1,3 +1,10 @@
+###2026.08.20.2
+- The settings page, the checks output and the notifications now follow the
+  language selected in Unraid (Settings -> Display Settings), instead of showing
+  both languages at once. Spanish when the locale starts with "es", English
+  otherwise, so any other language still gets a readable page. The log file
+  stays in English on purpose: it is what gets pasted into a bug report.
+
 ###2026.08.20.1
 - The settings page now shows the log: last 100 to 2000 lines, with refresh,
   clear, and an optional 5 second auto-refresh that keeps the newest lines in
