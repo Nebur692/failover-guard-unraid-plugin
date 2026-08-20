@@ -26,16 +26,10 @@ function t($en, $es) { global $ES; return $ES ? $es : $en; }
 $cfg = file_exists($cfgfile) ? parse_ini_file($cfgfile) : [];
 function v($cfg, $k, $d = "") { return htmlspecialchars($cfg[$k] ?? $d); }
 
-/* Per-field help. Unraid's own blockquotes only appear when you find the global
-   help toggle, which nobody does on a page they open once a year. These are
-   plain question marks next to the label: click, and the explanation unfolds
-   right under the field. */
-function hi($id) {
-    return '<a class="fg-i" onclick="fgHelp(\''.$id.'\')" title="?">?</a>';
-}
-function hb($id, $txt) {
-    return '<div class="fg-help" id="'.$id.'">'.$txt.'</div>';
-}
+/* Field help is written as plain markdown blockquotes below each field. Unraid
+   turns every blockquote into <blockquote class="inline_help">, hidden by CSS
+   and unfolded by the built-in Help button in the top bar. Use that mechanism —
+   do not build a custom one. */
 
 $status   = json_decode(shell_exec("bash " . escapeshellarg($script) . " status 2>/dev/null"), true) ?: [];
 $switched = ($status['switched'] ?? 'no') === 'yes';
@@ -71,12 +65,10 @@ if ($stale) { $hlabel = t('no recent reading', 'sin lectura reciente'); $hclass 
 .fg-warn  { background:#9a6700; }
 .fg-bad   { background:#b32d2e; }
 .fg-note  { opacity:.7; font-size:.9em; }
-.fg-i     { display:inline-block; width:17px; height:17px; line-height:17px; text-align:center;
-            border-radius:50%; background:#666; color:#fff; font-size:12px; font-weight:bold;
-            cursor:pointer; margin-left:6px; user-select:none; }
-.fg-i:hover { background:#1a7f37; }
-.fg-help  { display:none; margin:6px 0 2px 0; padding:8px 12px; border-left:3px solid #1a7f37;
-            background:rgba(128,128,128,.12); font-size:.92em; line-height:1.45; max-width:640px; }
+/* Not inline_help: this one is a live warning about the current state, so it has
+   to be visible without pressing anything. */
+.fg-warnbox { margin:0 0 14px 0; padding:8px 12px; border-left:3px solid #9a6700;
+              background:rgba(128,128,128,.12); line-height:1.45; max-width:760px; }
 </style>
 
 <div class="fg-bar">
@@ -100,116 +92,130 @@ if ($stale) { $hlabel = t('no recent reading', 'sin lectura reciente'); $hclass 
 </div>
 
 <?php if ($health === '2' && !$stale): ?>
-<div class="fg-help" style="display:block;border-left-color:#9a6700">
+<div class="fg-warnbox">
 <?= t('This server has no internet access, so the origin cannot be judged from here. No failover will happen while this lasts — and it would be pointless anyway, since nobody outside could reach this box either.',
       'Este servidor no tiene salida a Internet, así que desde aquí no se puede juzgar el origen. No se conmutará mientras dure — y tampoco serviría de nada, porque nadie de fuera podría llegar a este servidor.') ?>
 </div>
 <?php endif; ?>
 
-<p class="fg-note"><?= t('Click the ? next to any field for an explanation.',
-                          'Pulsa la ? que hay junto a cada campo para ver qué hace.') ?></p>
-
 <form markdown="1" method="POST" action="/update.htm" target="progressFrame">
 <input type="hidden" name="#file" value="<?= $plugin ?>/config">
 
-**<?= t('Enable failover', 'Activar el failover') ?><?= hi('h_en') ?>:**
+**<?= t('Enable failover', 'Activar el failover') ?>:**
 : <select name="ENABLED">
   <option value="no"  <?= v($cfg,'ENABLED','no')=='no'  ? 'selected' : '' ?>><?= t('No','No') ?></option>
   <option value="yes" <?= v($cfg,'ENABLED','no')=='yes' ? 'selected' : '' ?>><?= t('Yes','Sí') ?></option>
   </select>
-  <?= hb('h_en', t('The master switch. While this is off the watcher stays stopped and nothing is ever switched: no DNS changes, no proxy host enabled, no data copied. Everything else on this page is only read when this is on.',
-                   'El interruptor principal. Mientras esté en No, el vigilante no arranca y no se conmuta nada: ni se toca el DNS, ni se habilita el proxy, ni se copian datos. El resto de la página solo se usa cuando está en Sí.')) ?>
+
+> <?= t('The master switch. While this is off the watcher stays stopped and nothing is ever switched: no DNS changes, no proxy host enabled, no data copied. Everything else on this page is only read when this is on.',
+                   'El interruptor principal. Mientras esté en No, el vigilante no arranca y no se conmuta nada: ni se toca el DNS, ni se habilita el proxy, ni se copian datos. El resto de la página solo se usa cuando está en Sí.') ?>
 
 ### <?= t('Origin', 'Origen') ?>
 
-**<?= t('Origin host', 'Host del origen') ?><?= hi('h_oh') ?>:**
+**<?= t('Origin host', 'Host del origen') ?>:**
 : <input type="text" name="ORIGIN_HOST" value="<?= v($cfg,'ORIGIN_HOST') ?>" placeholder="vps.example.com">
-  <?= hb('h_oh', t('The machine being watched: your VPS or remote server, by its own host name — for example vps.example.com. <b>Not</b> your public domain. If your domain goes through Cloudflare or any CDN, that domain answers even when the server behind it is dead, so watching it would tell you nothing.',
-                   'La máquina que se vigila: tu VPS o servidor remoto, por su propio nombre de host — por ejemplo vps.example.com. <b>No</b> tu dominio público. Si el dominio pasa por Cloudflare o cualquier CDN, ese dominio responde aunque el servidor de detrás esté muerto, así que vigilarlo no diría nada.')) ?>
 
-**<?= t('TCP ports to probe', 'Puertos TCP a sondear') ?><?= hi('h_op') ?>:**
+> <?= t('The machine being watched: your VPS or remote server, by its own host name — for example vps.example.com. <b>Not</b> your public domain. If your domain goes through Cloudflare or any CDN, that domain answers even when the server behind it is dead, so watching it would tell you nothing.',
+                   'La máquina que se vigila: tu VPS o servidor remoto, por su propio nombre de host — por ejemplo vps.example.com. <b>No</b> tu dominio público. Si el dominio pasa por Cloudflare o cualquier CDN, ese dominio responde aunque el servidor de detrás esté muerto, así que vigilarlo no diría nada.') ?>
+
+**<?= t('TCP ports to probe', 'Puertos TCP a sondear') ?>:**
 : <input type="text" name="ORIGIN_PORTS" value="<?= v($cfg,'ORIGIN_PORTS','443') ?>" placeholder="22 443">
-  <?= hb('h_op', t('Ports that should be open when the server is alive, separated by spaces. Any one of them answering counts as alive. 22 (SSH) and 443 (HTTPS) is a good pair: if both are silent, the machine is really gone.',
-                   'Puertos que deberían estar abiertos con el servidor vivo, separados por espacios. Basta con que responda uno para darlo por vivo. 22 (SSH) y 443 (HTTPS) es una buena pareja: si los dos callan, la máquina no está.')) ?>
 
-**<?= t('Health path', 'Ruta de salud') ?><?= hi('h_hp') ?>:**
+> <?= t('Ports that should be open when the server is alive, separated by spaces. Any one of them answering counts as alive. 22 (SSH) and 443 (HTTPS) is a good pair: if both are silent, the machine is really gone.',
+                   'Puertos que deberían estar abiertos con el servidor vivo, separados por espacios. Basta con que responda uno para darlo por vivo. 22 (SSH) y 443 (HTTPS) es una buena pareja: si los dos callan, la máquina no está.') ?>
+
+**<?= t('Health path', 'Ruta de salud') ?>:**
 : <input type="text" name="HEALTH_PATH" value="<?= v($cfg,'HEALTH_PATH') ?>" placeholder="/api/health">
-  <?= hb('h_hp', t('Optional, but it is what makes this reliable. A URL path on your site that answers something predictable, such as /api/health. An open port only proves the machine booted — the web server or the database can be dead behind it and the port stays open. This is requested straight at the origin by IP, so a CDN in front cannot answer for it. Leave it empty and only ports are checked.',
-                   'Opcional, pero es lo que hace esto fiable de verdad. Una ruta de tu web que responda algo predecible, por ejemplo /api/health. Un puerto abierto solo demuestra que la máquina arrancó: el servidor web o la base de datos pueden estar muertos detrás y el puerto sigue abierto. Esto se pide directamente al origen por IP, así que un CDN delante no puede responder por él. Si lo dejas vacío, solo se comprueban los puertos.')) ?>
 
-**<?= t('Expected in response', 'Se espera en la respuesta') ?><?= hi('h_he') ?>:**
+> <?= t('Optional, but it is what makes this reliable. A URL path on your site that answers something predictable, such as /api/health. An open port only proves the machine booted — the web server or the database can be dead behind it and the port stays open. This is requested straight at the origin by IP, so a CDN in front cannot answer for it. Leave it empty and only ports are checked.',
+                   'Opcional, pero es lo que hace esto fiable de verdad. Una ruta de tu web que responda algo predecible, por ejemplo /api/health. Un puerto abierto solo demuestra que la máquina arrancó: el servidor web o la base de datos pueden estar muertos detrás y el puerto sigue abierto. Esto se pide directamente al origen por IP, así que un CDN delante no puede responder por él. Si lo dejas vacío, solo se comprueban los puertos.') ?>
+
+**<?= t('Expected in response', 'Se espera en la respuesta') ?>:**
 : <input type="text" name="HEALTH_EXPECT" value="<?= v($cfg,'HEALTH_EXPECT') ?>" placeholder='"ok":true'>
-  <?= hb('h_he', t('A piece of text that must appear in that response for the site to count as healthy. It does not have to be the whole answer, just something that only appears when things work. If you leave it empty, any non-empty response counts.',
-                   'Un fragmento de texto que debe aparecer en esa respuesta para dar el sitio por sano. No hace falta que sea la respuesta entera, basta con algo que solo salga cuando todo va bien. Si lo dejas vacío, vale cualquier respuesta que no venga vacía.')) ?>
+
+> <?= t('A piece of text that must appear in that response for the site to count as healthy. It does not have to be the whole answer, just something that only appears when things work. If you leave it empty, any non-empty response counts.',
+                   'Un fragmento de texto que debe aparecer en esa respuesta para dar el sitio por sano. No hace falta que sea la respuesta entera, basta con algo que solo salga cuando todo va bien. Si lo dejas vacío, vale cualquier respuesta que no venga vacía.') ?>
 
 ### <?= t('Switching', 'Conmutación') ?>
 
-**<?= t('Domain', 'Dominio') ?><?= hi('h_dm') ?>:**
+**<?= t('Domain', 'Dominio') ?>:**
 : <input type="text" name="DOMAIN" value="<?= v($cfg,'DOMAIN') ?>" placeholder="example.com">
-  <?= hb('h_dm', t('The domain whose DNS gets switched, and it must be a zone in your Cloudflare account. Every A and CNAME record in that zone is repointed, so use a domain dedicated to this site, not one shared with other services.',
-                   'El dominio cuyo DNS se conmuta, y tiene que ser una zona de tu cuenta de Cloudflare. Se reapuntan <b>todos</b> los registros A y CNAME de esa zona, así que usa un dominio dedicado a este sitio, no uno compartido con otros servicios.')) ?>
 
-**<?= t('Failover target', 'Destino del failover') ?><?= hi('h_ft') ?>:**
+> <?= t('The domain whose DNS gets switched, and it must be a zone in your Cloudflare account. Every A and CNAME record in that zone is repointed, so use a domain dedicated to this site, not one shared with other services.',
+                   'El dominio cuyo DNS se conmuta, y tiene que ser una zona de tu cuenta de Cloudflare. Se reapuntan <b>todos</b> los registros A y CNAME de esa zona, así que usa un dominio dedicado a este sitio, no uno compartido con otros servicios.') ?>
+
+**<?= t('Failover target', 'Destino del failover') ?>:**
 : <input type="text" name="FAILOVER_TARGET" value="<?= v($cfg,'FAILOVER_TARGET') ?>" placeholder="home.example.com">
-  <?= hb('h_ft', t('Where the domain points during an outage: this Unraid box, seen from the internet. A host name becomes a CNAME record, an IP becomes an A record. If your home connection has a changing IP, use the dynamic DNS name you already keep updated, with a short TTL — the plugin checks it matches your current public IP before switching, and refuses if it does not.',
-                   'A dónde apunta el dominio durante una caída: este servidor Unraid, visto desde internet. Un nombre de host se pone como registro CNAME; una IP, como registro A. Si tu conexión de casa cambia de IP, usa el nombre de DNS dinámico que ya mantienes al día, con TTL corto — el plugin comprueba que coincide con tu IP pública actual antes de conmutar, y se niega si no coincide.')) ?>
 
-**<?= t('Cloudflare API token', 'Token de API de Cloudflare') ?><?= hi('h_cf') ?>:**
+> <?= t('Where the domain points during an outage: this Unraid box, seen from the internet. A host name becomes a CNAME record, an IP becomes an A record. If your home connection has a changing IP, use the dynamic DNS name you already keep updated, with a short TTL — the plugin checks it matches your current public IP before switching, and refuses if it does not.',
+                   'A dónde apunta el dominio durante una caída: este servidor Unraid, visto desde internet. Un nombre de host se pone como registro CNAME; una IP, como registro A. Si tu conexión de casa cambia de IP, usa el nombre de DNS dinámico que ya mantienes al día, con TTL corto — el plugin comprueba que coincide con tu IP pública actual antes de conmutar, y se niega si no coincide.') ?>
+
+**<?= t('Cloudflare API token', 'Token de API de Cloudflare') ?>:**
 : <input type="password" name="CF_TOKEN" value="<?= v($cfg,'CF_TOKEN') ?>">
-  <?= hb('h_cf', t('Created at Cloudflare under My Profile -> API Tokens. Give it <b>Zone:Read</b> and <b>DNS:Edit</b>, and restrict it to this one zone. Do not use a Global API Key: that one can do anything to your whole account, and this plugin only needs to edit these records.',
-                   'Se crea en Cloudflare, en Mi perfil -> Tokens de API. Dale <b>Zone:Read</b> y <b>DNS:Edit</b>, y limítalo a esta única zona. No uses la Global API Key: esa puede hacer cualquier cosa en toda tu cuenta, y este plugin solo necesita editar estos registros.')) ?>
 
-**<?= t('Check interval (s)', 'Intervalo de comprobación (s)') ?><?= hi('h_ci') ?>:**
+> <?= t('Created at Cloudflare under My Profile -> API Tokens. Give it <b>Zone:Read</b> and <b>DNS:Edit</b>, and restrict it to this one zone. Do not use a Global API Key: that one can do anything to your whole account, and this plugin only needs to edit these records.',
+                   'Se crea en Cloudflare, en Mi perfil -> Tokens de API. Dale <b>Zone:Read</b> y <b>DNS:Edit</b>, y limítalo a esta única zona. No uses la Global API Key: esa puede hacer cualquier cosa en toda tu cuenta, y este plugin solo necesita editar estos registros.') ?>
+
+**<?= t('Check interval (s)', 'Intervalo de comprobación (s)') ?>:**
 : <input type="number" name="CHECK_INTERVAL" min="5" max="600" value="<?= v($cfg,'CHECK_INTERVAL','10') ?>">
-  <?= hb('h_ci', t('How often the origin is checked, in seconds. 10 is a good default: it is frequent enough to notice an outage almost immediately and light enough that the origin barely notices.',
-                   'Cada cuánto se comprueba el origen, en segundos. 10 es un buen valor: lo bastante frecuente para enterarse casi al momento y lo bastante ligero para que el origen ni lo note.')) ?>
 
-**<?= t('Failures before switching', 'Fallos antes de conmutar') ?><?= hi('h_ft2') ?>:**
+> <?= t('How often the origin is checked, in seconds. 10 is a good default: it is frequent enough to notice an outage almost immediately and light enough that the origin barely notices.',
+                   'Cada cuánto se comprueba el origen, en segundos. 10 es un buen valor: lo bastante frecuente para enterarse casi al momento y lo bastante ligero para que el origen ni lo note.') ?>
+
+**<?= t('Failures before switching', 'Fallos antes de conmutar') ?>:**
 : <input type="number" name="FAIL_THRESHOLD" min="1" max="20" value="<?= v($cfg,'FAIL_THRESHOLD','3') ?>">
-  <?= hb('h_ft2', t('How many checks in a row must fail before switching. Detection time is interval x this number — 10 seconds x 3 means about half a minute. Do not set it to 1: a single dropped packet would move your live site.',
-                    'Cuántas comprobaciones seguidas deben fallar antes de conmutar. El tiempo de detección es intervalo × este número: 10 segundos × 3 son unos treinta segundos. No lo pongas a 1: un solo paquete perdido movería tu web en producción.')) ?>
+
+> <?= t('How many checks in a row must fail before switching. Detection time is interval x this number — 10 seconds x 3 means about half a minute. Do not set it to 1: a single dropped packet would move your live site.',
+                    'Cuántas comprobaciones seguidas deben fallar antes de conmutar. El tiempo de detección es intervalo × este número: 10 segundos × 3 son unos treinta segundos. No lo pongas a 1: un solo paquete perdido movería tu web en producción.') ?>
 
 ### <?= t('Nginx Proxy Manager (optional)', 'Nginx Proxy Manager (opcional)') ?>
 
-**<?= t('NPM data path', 'Ruta de datos de NPM') ?><?= hi('h_nd') ?>:**
+**<?= t('NPM data path', 'Ruta de datos de NPM') ?>:**
 : <input type="text" name="NPM_DATA" value="<?= v($cfg,'NPM_DATA') ?>" placeholder="/mnt/user/appdata/NginxProxyManager/data">
-  <?= hb('h_nd', t('The folder you mapped to /data in your Nginx Proxy Manager container — the one holding database.sqlite. Leave this section empty if you do not use NPM; then only DNS is switched and you take care of serving the site yourself.',
-                   'La carpeta que tienes mapeada a /data en tu contenedor de Nginx Proxy Manager, la que contiene database.sqlite. Deja esta sección vacía si no usas NPM: entonces solo se conmuta el DNS y de servir el sitio te encargas tú.')) ?>
 
-**<?= t('NPM container', 'Contenedor de NPM') ?><?= hi('h_nc') ?>:**
+> <?= t('The folder you mapped to /data in your Nginx Proxy Manager container — the one holding database.sqlite. Leave this section empty if you do not use NPM; then only DNS is switched and you take care of serving the site yourself.',
+                   'La carpeta que tienes mapeada a /data en tu contenedor de Nginx Proxy Manager, la que contiene database.sqlite. Deja esta sección vacía si no usas NPM: entonces solo se conmuta el DNS y de servir el sitio te encargas tú.') ?>
+
+**<?= t('NPM container', 'Contenedor de NPM') ?>:**
 : <input type="text" name="NPM_CONTAINER" value="<?= v($cfg,'NPM_CONTAINER','Nginx-Proxy-Manager-Official') ?>">
-  <?= hb('h_nc', t('The container name exactly as it appears on the Docker tab. It is used to reload nginx after enabling or disabling the host.',
-                   'El nombre del contenedor tal cual aparece en la pestaña Docker. Se usa para recargar nginx después de habilitar o deshabilitar el host.')) ?>
 
-**<?= t('Proxy host ID', 'ID del proxy host') ?><?= hi('h_ni') ?>:**
+> <?= t('The container name exactly as it appears on the Docker tab. It is used to reload nginx after enabling or disabling the host.',
+                   'El nombre del contenedor tal cual aparece en la pestaña Docker. Se usa para recargar nginx después de habilitar o deshabilitar el host.') ?>
+
+**<?= t('Proxy host ID', 'ID del proxy host') ?>:**
 : <input type="text" name="NPM_HOST_ID" value="<?= v($cfg,'NPM_HOST_ID') ?>" placeholder="65">
-  <?= hb('h_ni', t('The numeric id of the proxy host in NPM that serves this site from your Unraid box. Open that host in the NPM interface and read the number at the end of the address bar. <b>Leave that host disabled</b> in normal times: the plugin enables it only during a failover, so two copies of your site never accept writes at the same time.',
-                   'El número identificador del proxy host de NPM que sirve este sitio desde tu Unraid. Abre ese host en la interfaz de NPM y mira el número al final de la barra de direcciones. <b>Deja ese host deshabilitado</b> en condiciones normales: el plugin lo habilita solo durante un failover, para que nunca haya dos copias de tu sitio aceptando escrituras a la vez.')) ?>
+
+> <?= t('The numeric id of the proxy host in NPM that serves this site from your Unraid box. Open that host in the NPM interface and read the number at the end of the address bar. <b>Leave that host disabled</b> in normal times: the plugin enables it only during a failover, so two copies of your site never accept writes at the same time.',
+                   'El número identificador del proxy host de NPM que sirve este sitio desde tu Unraid. Abre ese host en la interfaz de NPM y mira el número al final de la barra de direcciones. <b>Deja ese host deshabilitado</b> en condiciones normales: el plugin lo habilita solo durante un failover, para que nunca haya dos copias de tu sitio aceptando escrituras a la vez.') ?>
 
 ### <?= t('Data hooks', 'Enganches de datos') ?>
 
-**<?= t('Replicate hook', 'Enganche de réplica') ?><?= hi('h_hr') ?>:**
+**<?= t('Replicate hook', 'Enganche de réplica') ?>:**
 : <input type="text" name="HOOK_REPLICATE" value="<?= v($cfg,'HOOK_REPLICATE') ?>" placeholder="/boot/config/plugins/failover-guard/replicate.sh">
-  <?= hb('h_hr', t('Path to a script of yours that copies the live data from the origin down to this box, so the local copy is ready to take over. It runs while everything is fine. This plugin never touches your data: only you know whether that means a database, a folder, or both.',
-                   'Ruta a un script tuyo que copia los datos del origen hasta este servidor, para que la copia local esté lista para tomar el relevo. Se ejecuta mientras todo va bien. El plugin no toca tus datos: solo tú sabes si eso es una base de datos, una carpeta o las dos cosas.')) ?>
 
-**<?= t('Pre-failback hook', 'Enganche previo al failback') ?><?= hi('h_hf') ?>:**
+> <?= t('Path to a script of yours that copies the live data from the origin down to this box, so the local copy is ready to take over. It runs while everything is fine. This plugin never touches your data: only you know whether that means a database, a folder, or both.',
+                   'Ruta a un script tuyo que copia los datos del origen hasta este servidor, para que la copia local esté lista para tomar el relevo. Se ejecuta mientras todo va bien. El plugin no toca tus datos: solo tú sabes si eso es una base de datos, una carpeta o las dos cosas.') ?>
+
+**<?= t('Pre-failback hook', 'Enganche previo al failback') ?>:**
 : <input type="text" name="HOOK_PRE_FAILBACK" value="<?= v($cfg,'HOOK_PRE_FAILBACK') ?>" placeholder="/boot/config/plugins/failover-guard/failback.sh">
-  <?= hb('h_hf', t('Path to a script of yours that copies data <b>from this box back up to the origin</b>, before handing the site back. This is the important one: while the domain pointed here, this is where new data was written, so pulling from the origin instead would erase it. It runs with the local proxy host already disabled, so nothing can be written mid-copy, and if it fails the failback is cancelled and this box keeps serving.',
-                   'Ruta a un script tuyo que copia los datos <b>desde este servidor de vuelta al origen</b>, antes de devolverle el sitio. Este es el importante: mientras el dominio apuntó aquí, es aquí donde se escribieron los datos nuevos, así que traerlos del origen los borraría. Se ejecuta con el proxy local ya deshabilitado, para que nada pueda escribirse a mitad de copia, y si falla se cancela el failback y este servidor sigue sirviendo.')) ?>
 
-**<?= t('Replicate interval (s)', 'Intervalo de réplica (s)') ?><?= hi('h_ri') ?>:**
+> <?= t('Path to a script of yours that copies data <b>from this box back up to the origin</b>, before handing the site back. This is the important one: while the domain pointed here, this is where new data was written, so pulling from the origin instead would erase it. It runs with the local proxy host already disabled, so nothing can be written mid-copy, and if it fails the failback is cancelled and this box keeps serving.',
+                   'Ruta a un script tuyo que copia los datos <b>desde este servidor de vuelta al origen</b>, antes de devolverle el sitio. Este es el importante: mientras el dominio apuntó aquí, es aquí donde se escribieron los datos nuevos, así que traerlos del origen los borraría. Se ejecuta con el proxy local ya deshabilitado, para que nada pueda escribirse a mitad de copia, y si falla se cancela el failback y este servidor sigue sirviendo.') ?>
+
+**<?= t('Replicate interval (s)', 'Intervalo de réplica (s)') ?>:**
 : <input type="number" name="REPLICATE_INTERVAL" min="300" value="<?= v($cfg,'REPLICATE_INTERVAL','3600') ?>">
-  <?= hb('h_ri', t('How often the replicate hook runs, in seconds. 3600 is once an hour. Whatever happened since the last copy is what you would lose in an outage, so shorter means less loss and more load on the origin.',
-                   'Cada cuánto se ejecuta el enganche de réplica, en segundos. 3600 es una vez por hora. Lo ocurrido desde la última copia es lo que perderías en una caída, así que menos tiempo significa perder menos y cargar más el origen.')) ?>
 
-**<?= t('Notifications', 'Notificaciones') ?><?= hi('h_nt') ?>:**
+> <?= t('How often the replicate hook runs, in seconds. 3600 is once an hour. Whatever happened since the last copy is what you would lose in an outage, so shorter means less loss and more load on the origin.',
+                   'Cada cuánto se ejecuta el enganche de réplica, en segundos. 3600 es una vez por hora. Lo ocurrido desde la última copia es lo que perderías en una caída, así que menos tiempo significa perder menos y cargar más el origen.') ?>
+
+**<?= t('Notifications', 'Notificaciones') ?>:**
 : <select name="NOTIFY">
   <option value="yes" <?= v($cfg,'NOTIFY','yes')=='yes' ? 'selected' : '' ?>><?= t('Yes','Sí') ?></option>
   <option value="no"  <?= v($cfg,'NOTIFY','yes')=='no'  ? 'selected' : '' ?>><?= t('No','No') ?></option>
   </select>
-  <?= hb('h_nt', t('Send an Unraid notification when a failover or failback happens, or when one is refused. These are rare and always worth reading, so leaving this on is recommended.',
-                   'Envía una notificación de Unraid cuando ocurre un failover o un failback, o cuando se rechaza uno. Son raras y siempre merece la pena leerlas, así que lo recomendable es dejarlo activado.')) ?>
+
+> <?= t('Send an Unraid notification when a failover or failback happens, or when one is refused. These are rare and always worth reading, so leaving this on is recommended.',
+                   'Envía una notificación de Unraid cuando ocurre un failover o un failback, o cuando se rechaza uno. Son raras y siempre merece la pena leerlas, así que lo recomendable es dejarlo activado.') ?>
 
 &nbsp;
 : <input type="submit" value="<?= t('Apply','Aplicar') ?>"><input type="button" value="<?= t('Done','Hecho') ?>" onclick="done()">
@@ -242,11 +248,6 @@ if ($stale) { $hlabel = t('no recent reading', 'sin lectura reciente'); $hclass 
 <script>
 var fgTimer = null;
 var fgRunning = <?= json_encode(t('Running…','Comprobando…')) ?>;
-
-function fgHelp(id) {
-  var el = document.getElementById(id);
-  if (el) el.style.display = (el.style.display === 'block') ? 'none' : 'block';
-}
 
 function fgTest() {
   document.getElementById('fgtest').textContent = fgRunning;
