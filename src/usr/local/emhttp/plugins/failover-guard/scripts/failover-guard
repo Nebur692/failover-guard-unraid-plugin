@@ -354,7 +354,8 @@ case "$MODE" in
     test)
         origin_health; h=$?
         w=22
-        printf "%-${w}s %s\n" "$(tt 'enabled:' 'activado:')" "$ENABLED"
+        printf "%-${w}s %s\n" "$(tt 'enabled:' 'activado:')" \
+               "$([ "$ENABLED" = "yes" ] && tt yes sí || tt no no)"
         printf "%-${w}s %s\n" "$(tt 'local network:' 'red local:')" \
                "$(local_net_ok && echo OK || echo "$(tt FAIL FALLO)")"
         printf "%-${w}s %s\n" "$(tt 'origin ports:' 'puertos del origen:')" \
