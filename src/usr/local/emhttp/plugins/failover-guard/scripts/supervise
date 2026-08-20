@@ -27,5 +27,10 @@ fi
 
 if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then exit 0; fi
 
-setsid nohup bash "$BASE/scripts/failover-guard" watch >/dev/null 2>&1 &
+# --fork is not optional: without it setsid only creates a new session when the
+# caller is not already a process group leader, so launching this from an
+# interactive shell leaves the watcher in that shell's group and it dies with it.
+# Started from cron it happened to survive, which is exactly the kind of bug that
+# only shows up for whoever runs it by hand.
+setsid --fork bash "$BASE/scripts/failover-guard" watch >/dev/null 2>&1 < /dev/null &
 echo "$(date '+%Y-%m-%d %H:%M:%S') Watcher started by supervisor" >> "$LOG"
