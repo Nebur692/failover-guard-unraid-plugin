@@ -3,7 +3,7 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "failover-guard">
 <!ENTITY author    "Nebur692">
-<!ENTITY version   "2026.08.20.2">
+<!ENTITY version   "2026.08.20.3">
 <!ENTITY launch    "Settings/FailoverGuard">
 <!ENTITY gitURL    "https://raw.githubusercontent.com/Nebur692/failover-guard-unraid-plugin/main">
 <!ENTITY pluginURL "&gitURL;/&name;.plg">
@@ -17,6 +17,10 @@
         min="6.12.0">
 
 <CHANGES>
+###2026.08.20.3
+- The "enabled" line in the checks output showed the raw yes/no from the config
+  file instead of the translated word.
+
 ###2026.08.20.2
 - The settings page, the checks output and the notifications now follow the
   language selected in Unraid (Settings -> Display Settings), instead of showing
@@ -408,7 +412,8 @@ case "$MODE" in
     test)
         origin_health; h=$?
         w=22
-        printf "%-${w}s %s\n" "$(tt 'enabled:' 'activado:')" "$ENABLED"
+        printf "%-${w}s %s\n" "$(tt 'enabled:' 'activado:')" \
+               "$([ "$ENABLED" = "yes" ] && tt yes sí || tt no no)"
         printf "%-${w}s %s\n" "$(tt 'local network:' 'red local:')" \
                "$(local_net_ok && echo OK || echo "$(tt FAIL FALLO)")"
         printf "%-${w}s %s\n" "$(tt 'origin ports:' 'puertos del origen:')" \
@@ -438,7 +443,7 @@ case "$MODE" in
 esac
 ]]>
  </INLINE>
- <SHA256>a13a478cc67a398c96a64dbdc85a0b85c2b77a5dea87eaf3385ee1156ef7819d</SHA256>
+ <SHA256>ef4a2c8631aa29c17457f35799bc219710cdf3e2002185c0cd50d4de055c7fe3</SHA256>
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/failover-guard/scripts/supervise" Mode="0755">
