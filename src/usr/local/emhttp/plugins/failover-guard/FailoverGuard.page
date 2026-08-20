@@ -30,6 +30,27 @@ $status   = json_decode(shell_exec("bash " . escapeshellarg($script) . " status 
 $switched = ($status['switched'] ?? 'no') === 'yes';
 $watcher  = $status['watcher'] ?? 'stopped';
 $lastrep  = (int)($status['last_replicate'] ?? 0);
+
+/* Health as last seen by the watcher, not a fresh probe: showing it live would
+   make this page wait several seconds every time it loads, and it would also
+   disagree with what the watcher is actually acting on. */
+$health   = $status['health'] ?? '';
+$fails    = (int)($status['fails'] ?? 0);
+$checked  = (int)($status['checked'] ?? 0);
+$age      = $checked > 0 ? time() - $checked : -1;
+
+/* A reading nobody has refreshed is not a reading. If the watcher died, the last
+   value on disk could be hours old and would be read as if it were current. */
+$stale    = ($age < 0 || $age > 120);
+
+switch ($health) {
+    case '0': $hlabel = t('HEALTHY', 'SANO');                  $hclass = 'fg-ok';   break;
+    case '1': $hlabel = t('ORIGIN DOWN', 'ORIGEN CAÍDO');       $hclass = 'fg-bad';  break;
+    case '2': $hlabel = t('INCONCLUSIVE — no internet here', 'NO CONCLUYENTE — sin internet aquí');
+              $hclass = 'fg-warn'; break;
+    default:  $hlabel = t('unknown', 'desconocido');            $hclass = 'fg-warn'; break;
+}
+if ($stale) { $hlabel = t('no recent reading', 'sin lectura reciente'); $hclass = 'fg-warn'; }
 ?>
 
 <style>
@@ -53,6 +74,27 @@ $lastrep  = (int)($status['last_replicate'] ?? 0);
   </span>
   <?php endif; ?>
 </div>
+
+<div style="margin-bottom:14px">
+  <span class="fg-state <?= $hclass ?>">
+    <?= t('Origin', 'Origen') ?>: <?= $hlabel ?>
+  </span>
+  <?php if (!$stale && $fails > 0): ?>
+  <span class="fg-state fg-warn">
+    <?= t('Consecutive failures', 'Fallos seguidos') ?>: <?= $fails ?>/<?= v($cfg,'FAIL_THRESHOLD','3') ?>
+  </span>
+  <?php endif; ?>
+  <?php if (!$stale): ?>
+  <span class="fg-note" style="opacity:.75;font-size:.9em">
+    <?= t('checked', 'comprobado hace') ?> <?= $age ?> <?= t('seconds ago', 'segundos') ?>
+  </span>
+  <?php endif; ?>
+</div>
+
+<?php if ($health === '2' && !$stale): ?>
+> <?= t('This server has no internet access, so the origin cannot be judged from here. No failover will happen while this lasts — and it would be pointless anyway, since nobody outside could reach this box either.',
+       'Este servidor no tiene salida a Internet, así que desde aquí no se puede juzgar el origen. No se conmutará mientras dure — y tampoco serviría de nada, porque nadie de fuera podría llegar a este servidor.') ?>
+<?php endif; ?>
 
 <form markdown="1" method="POST" action="/update.htm" target="progressFrame">
 <input type="hidden" name="#file" value="<?= $plugin ?>/config">
