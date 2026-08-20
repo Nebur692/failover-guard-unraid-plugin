@@ -1,3 +1,8 @@
+###2026.08.20.1
+- The settings page now shows the log: last 100 to 2000 lines, with refresh,
+  clear, and an optional 5 second auto-refresh that keeps the newest lines in
+  view. Until now the page only told you where the file was.
+
 ###2026.08.20
 - First release. Watches a remote origin from your Unraid box and fails over
   automatically when it dies: switches the Cloudflare DNS records of a zone to a
