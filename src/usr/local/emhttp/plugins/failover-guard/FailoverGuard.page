@@ -98,7 +98,9 @@ if ($stale) { $hlabel = t('no recent reading', 'sin lectura reciente'); $hclass 
 </div>
 <?php endif; ?>
 
-<form markdown="1" method="POST" action="/update.htm" target="progressFrame">
+<!-- /update.php is what actually writes the file. /update.htm is only the
+     progress page, so posting there looks like it worked and saves nothing. -->
+<form markdown="1" method="POST" action="/update.php" target="progressFrame">
 <input type="hidden" name="#file" value="<?= $plugin ?>/config">
 
 **<?= t('Enable failover', 'Activar el failover') ?>:**
