@@ -1,3 +1,20 @@
+###2026.08.21.1
+- The standby copy is watched too. Until now the only thing ever checked about
+  plan B was that a DNS record resolved, so a replica could sit for days
+  answering errors and nothing noticed until the day it had to take over — which
+  is exactly what happened here. Set TARGET_HEALTH_URL to a URL where the copy on
+  this box answers (the backend directly: at rest the proxy host is disabled, so
+  the site is not reachable locally by its public name) and it is asked every
+  TARGET_CHECK_INTERVAL. Its state shows next to the origin on the page, and only
+  changes are notified.
+- A broken standby warns, it never vetoes. Refusing to switch would turn a
+  degraded site into an offline one, and this probe can be wrong too; the failover
+  goes ahead with a loud notification instead.
+- A failover target whose address does not match this box's public IP no longer
+  blocks the switch on its own when the standby answers. On a box behind two
+  internet lines there is no single "our public IP", and the line traffic leaves
+  by is not necessarily the one the record points at.
+
 ###2026.08.21
 - The settings page never saved anything. The form posted to /update.htm, which
   is only the progress page; the file is written by /update.php. Every field
