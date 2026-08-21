@@ -1,3 +1,19 @@
+###2026.08.21
+- The settings page never saved anything. The form posted to /update.htm, which
+  is only the progress page; the file is written by /update.php. Every field
+  looked like it was applied and nothing reached the config file.
+- The watcher read the configuration once at start and never again, so a change
+  made on the page did nothing until someone restarted it. It is now reloaded
+  whenever the file changes, and the reload is logged.
+- A broken resolver was reported as a dead origin. Every probe reaches the origin
+  by name, but the "do we have internet" check only opened a socket to an IP, so
+  with DNS down all of them failed and the origin was declared dead. That check
+  now also requires a name to resolve, and returns "inconclusive" instead.
+- Failures are ignored for the first few minutes after this box boots
+  (BOOT_GRACE, 300s). Right after a reboot the network stack and Docker are still
+  coming up and anything measured says more about us than about the origin: a
+  real reboot produced four failover attempts in six minutes.
+
 ###2026.08.20.8
 - The watcher could die together with the shell that started it: setsid only
   creates a new session when the caller is not already a process group leader, so
