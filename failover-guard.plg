@@ -3,7 +3,7 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "failover-guard">
 <!ENTITY author    "Nebur692">
-<!ENTITY version   "2026.08.20.8">
+<!ENTITY version   "2026.08.21">
 <!ENTITY launch    "Settings/FailoverGuard">
 <!ENTITY gitURL    "https://raw.githubusercontent.com/Nebur692/failover-guard-unraid-plugin/main">
 <!ENTITY pluginURL "&gitURL;/&name;.plg">
@@ -17,6 +17,22 @@
         min="6.12.0">
 
 <CHANGES>
+###2026.08.21
+- The settings page never saved anything. The form posted to /update.htm, which
+  is only the progress page; the file is written by /update.php. Every field
+  looked like it was applied and nothing reached the config file.
+- The watcher read the configuration once at start and never again, so a change
+  made on the page did nothing until someone restarted it. It is now reloaded
+  whenever the file changes, and the reload is logged.
+- A broken resolver was reported as a dead origin. Every probe reaches the origin
+  by name, but the "do we have internet" check only opened a socket to an IP, so
+  with DNS down all of them failed and the origin was declared dead. That check
+  now also requires a name to resolve, and returns "inconclusive" instead.
+- Failures are ignored for the first few minutes after this box boots
+  (BOOT_GRACE, 300s). Right after a reboot the network stack and Docker are still
+  coming up and anything measured says more about us than about the origin: a
+  real reboot produced four failover attempts in six minutes.
+
 ###2026.08.20.8
 - The watcher could die together with the shell that started it: setsid only
   creates a new session when the caller is not already a process group leader, so
@@ -134,9 +150,26 @@ HOOK_REPLICATE=""             # runs while the origin is healthy: origin -> here
 HOOK_PRE_FAILBACK=""          # runs before returning: here -> origin
 REPLICATE_INTERVAL=3600
 RETRY_INTERVAL=60             # wait this long before retrying a hook that refused
+BOOT_GRACE=300                # ignore failures for this long after this box booted
 NOTIFY="yes"
 
 [ -f "$CONFIG" ] && . "$CONFIG"
+
+# The watcher is a long-lived process: without this it would keep serving the
+# settings it was started with, and a change made on the page would silently do
+# nothing until someone happened to restart it. update.php writes the file
+# atomically, so sourcing it mid-flight cannot read half a file.
+CONFIG_STAMP=$(stat -c %Y "$CONFIG" 2>/dev/null)
+reload_config_if_changed() {
+    local stamp
+    stamp=$(stat -c %Y "$CONFIG" 2>/dev/null)
+    [ -z "$stamp" ] && return 1
+    [ "$stamp" = "$CONFIG_STAMP" ] && return 1
+    CONFIG_STAMP="$stamp"
+    . "$CONFIG"
+    log "Configuration reloaded"
+    return 0
+}
 
 MODE="${1:-status}"
 
@@ -178,12 +211,31 @@ cf_zone() { cf_api GET "/zones?name=$DOMAIN" | jq -r '.result[0].id'; }
 # Does this box have internet at all? If not, the origin may be perfectly fine
 # and we simply cannot see it — and failing over would be pointless anyway,
 # since nobody could reach us either.
+#
+# Reaching an IP is not enough: every probe below reaches the origin BY NAME, so
+# a resolver that is not up yet makes them all fail and the origin gets declared
+# dead while it is perfectly healthy. Well known names are used on purpose, never
+# the origin's own: if the origin's record really disappeared that is a genuine
+# outage, not an excuse to look the other way.
 local_net_ok() {
-    local d
+    local d reachable=0
     for d in 1.1.1.1 8.8.8.8; do
-        timeout 3 bash -c "echo > /dev/tcp/$d/443" 2>/dev/null && return 0
+        timeout 3 bash -c "echo > /dev/tcp/$d/443" 2>/dev/null && { reachable=1; break; }
+    done
+    [ "$reachable" = "1" ] || return 1
+    for d in one.one.one.one dns.google; do
+        [ -n "$(timeout 5 getent hosts "$d" 2>/dev/null | head -1)" ] && return 0
     done
     return 1
+}
+
+# Right after a reboot the network stack, the resolver and Docker are still
+# coming up, so anything we measure says more about us than about the origin.
+just_booted() {
+    local up
+    [ "${BOOT_GRACE:-0}" -gt 0 ] 2>/dev/null || return 1
+    up=$(cut -d. -f1 /proc/uptime 2>/dev/null)
+    [ -n "$up" ] && [ "$up" -lt "$BOOT_GRACE" ]
 }
 
 origin_ports_open() {
@@ -409,13 +461,21 @@ publish_health() {
 }
 
 watch_loop() {
-    local fails=0 st
+    local fails=0 st booting=0
     log "Watcher started (every ${CHECK_INTERVAL}s, $FAIL_THRESHOLD failures to switch)"
     echo $$ > "$STATE/watcher.pid"
     trap 'rm -f "$STATE/watcher.pid"; exit 0' TERM INT
 
     while true; do
+        reload_config_if_changed
         if [ "$ENABLED" != "yes" ]; then sleep "$CHECK_INTERVAL"; continue; fi
+
+        if just_booted; then
+            [ "$booting" != "1" ] && { log "This box booted less than ${BOOT_GRACE}s ago: not judging the origin yet"; booting=1; }
+            publish_health 2 0; fails=0
+            sleep "$CHECK_INTERVAL"; continue
+        fi
+        booting=0
 
         origin_health; st=$?
         publish_health "$st" "$fails"
@@ -436,7 +496,7 @@ watch_loop() {
             0) [ $fails -gt 0 ] && log "Origin responding again (discarding $fails failures)"
                fails=0
                maybe_replicate ;;
-            2) [ $fails -gt 0 ] && log "No internet on this box: not counting the failure"
+            2) [ $fails -gt 0 ] && log "No working internet or DNS on this box: not counting the failure"
                fails=0 ;;
             1) fails=$((fails+1))
                log "Origin not responding (failure $fails of $FAIL_THRESHOLD)"
@@ -471,7 +531,7 @@ case "$MODE" in
         w=22
         printf "%-${w}s %s\n" "$(tt 'enabled:' 'activado:')" \
                "$([ "$ENABLED" = "yes" ] && tt yes sí || tt no no)"
-        printf "%-${w}s %s\n" "$(tt 'local network:' 'red local:')" \
+        printf "%-${w}s %s\n" "$(tt 'local network and DNS:' 'red local y DNS:')" \
                "$(local_net_ok && echo OK || echo "$(tt FAIL FALLO)")"
         printf "%-${w}s %s\n" "$(tt 'origin ports:' 'puertos del origen:')" \
                "$(origin_ports_open && echo OK || echo "$(tt FAIL FALLO)")"
@@ -504,7 +564,7 @@ case "$MODE" in
 esac
 ]]>
  </INLINE>
- <SHA256>c578cfad2bc34a60ab4906f6c207af5eeb121881f2b52768556983cce3c5d85a</SHA256>
+ <SHA256>a877f011595e6646387bc65736750a5062c92a04a84cfa3f6f8dd703ffbaee10</SHA256>
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/failover-guard/scripts/supervise" Mode="0755">
@@ -654,7 +714,9 @@ if ($stale) { $hlabel = t('no recent reading', 'sin lectura reciente'); $hclass 
 </div>
 <?php endif; ?>
 
-<form markdown="1" method="POST" action="/update.htm" target="progressFrame">
+<!-- /update.php is what actually writes the file. /update.htm is only the
+     progress page, so posting there looks like it worked and saves nothing. -->
+<form markdown="1" method="POST" action="/update.php" target="progressFrame">
 <input type="hidden" name="#file" value="<?= $plugin ?>/config">
 
 **<?= t('Enable failover', 'Activar el failover') ?>:**
@@ -848,7 +910,7 @@ $(function() {
 </script>
 ]]>
  </INLINE>
- <SHA256>1d0f58edfd9ecebad6dc55bd1c8daab4281fc8147f3ad2e5890fdc7cbf70f7f6</SHA256>
+ <SHA256>4616008c3aeca597a18ad20c32f11716dd0b52a82ae88e313f2d14196d00b5e8</SHA256>
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/failover-guard/include/action.php" Mode="0644">
