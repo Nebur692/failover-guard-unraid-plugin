@@ -3,7 +3,7 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "failover-guard">
 <!ENTITY author    "Nebur692">
-<!ENTITY version   "2026.08.21">
+<!ENTITY version   "2026.08.21.1">
 <!ENTITY launch    "Settings/FailoverGuard">
 <!ENTITY gitURL    "https://raw.githubusercontent.com/Nebur692/failover-guard-unraid-plugin/main">
 <!ENTITY pluginURL "&gitURL;/&name;.plg">
@@ -17,6 +17,23 @@
         min="6.12.0">
 
 <CHANGES>
+###2026.08.21.1
+- The standby copy is watched too. Until now the only thing ever checked about
+  plan B was that a DNS record resolved, so a replica could sit for days
+  answering errors and nothing noticed until the day it had to take over — which
+  is exactly what happened here. Set TARGET_HEALTH_URL to a URL where the copy on
+  this box answers (the backend directly: at rest the proxy host is disabled, so
+  the site is not reachable locally by its public name) and it is asked every
+  TARGET_CHECK_INTERVAL. Its state shows next to the origin on the page, and only
+  changes are notified.
+- A broken standby warns, it never vetoes. Refusing to switch would turn a
+  degraded site into an offline one, and this probe can be wrong too; the failover
+  goes ahead with a loud notification instead.
+- A failover target whose address does not match this box's public IP no longer
+  blocks the switch on its own when the standby answers. On a box behind two
+  internet lines there is no single "our public IP", and the line traffic leaves
+  by is not necessarily the one the record points at.
+
 ###2026.08.21
 - The settings page never saved anything. The form posted to /update.htm, which
   is only the progress page; the file is written by /update.php. Every field
@@ -146,6 +163,9 @@ FAIL_THRESHOLD=3
 NPM_DATA=""                   # e.g. /mnt/cache/appdata/NginxProxyManager/data
 NPM_CONTAINER="Nginx-Proxy-Manager-Official"
 NPM_HOST_ID=""
+TARGET_HEALTH_URL=""          # optional: URL of the standby copy ON THIS BOX
+TARGET_EXPECT=""              # optional: string its response must contain
+TARGET_CHECK_INTERVAL=300     # how often to ask the standby whether it still works
 HOOK_REPLICATE=""             # runs while the origin is healthy: origin -> here
 HOOK_PRE_FAILBACK=""          # runs before returning: here -> origin
 REPLICATE_INTERVAL=3600
@@ -268,6 +288,23 @@ origin_health() {
     return 0
 }
 
+# Is the standby copy on this box actually able to serve? Everything else here
+# watches the origin; without this the only thing ever checked about plan B is
+# that a DNS record resolves. A replica can sit there for days answering errors
+# and nothing notices until the day it has to take over.
+#
+# It has to be asked at a URL that works while the copy is at rest: if the proxy
+# host is disabled (which is the correct resting state) the site is not reachable
+# by its public name from here, so this points straight at the backend.
+# 0 = healthy · 1 = not healthy · 2 = not configured
+target_app_ok() {
+    [ -z "$TARGET_HEALTH_URL" ] && return 2
+    local body
+    body=$(timeout 10 curl -s --max-time 10 "$TARGET_HEALTH_URL" 2>/dev/null) || return 1
+    [ -z "$TARGET_EXPECT" ] && { [ -n "$body" ] && return 0 || return 1; }
+    case "$body" in *"$TARGET_EXPECT"*) return 0 ;; *) return 1 ;; esac
+}
+
 # Never send traffic to a failover target that is not ready: if your dynamic DNS
 # has not caught up, switching sends users nowhere. Worse than staying put.
 target_ready() {
@@ -280,6 +317,16 @@ target_ready() {
             ip_w=$(timeout 8 curl -s https://api.ipify.org 2>/dev/null)
             [ -z "$ip_w" ] && return 0
             [ "$ip_t" = "$ip_w" ] && return 0
+            # A mismatch used to be an outright veto. It cannot be, on a box
+            # behind more than one internet line: there is no single "our public
+            # IP" then, and the line traffic happens to leave by is not
+            # necessarily the one the record points at. So when the standby copy
+            # itself answers, that is better evidence than the address
+            # comparison and it wins.
+            if target_app_ok; then
+                log "Failover target $FAILOVER_TARGET resolves to $ip_t and traffic leaves through $ip_w, but the standby copy answers: switching anyway"
+                return 0
+            fi
             log "Failover target $FAILOVER_TARGET resolves to $ip_t but our public IP is $ip_w"
             return 1 ;;
         *) return 0 ;;
@@ -378,6 +425,15 @@ do_failover() {
         return 1
     fi
 
+    # A standby that answers wrongly is a warning, never a veto. Refusing here
+    # would turn "the site is degraded" into "the site is down", and this probe
+    # can be wrong too. The decision belongs to whoever reads the alert.
+    if ! target_app_ok && [ -n "$TARGET_HEALTH_URL" ]; then
+        log "WARNING: the standby copy is not answering as expected; switching anyway, but check it now"
+        notify "$(tt 'Failover onto a copy that looks broken' 'Failover a una copia que parece rota')" \
+               "$(tt "Switching because the origin is down, but $TARGET_HEALTH_URL is not answering as expected. Check the site." "Se conmuta porque el origen está caído, pero $TARGET_HEALTH_URL no responde como se espera. Revisa el sitio.")" "alert"
+    fi
+
     # Enable locally first: switching DNS onto a box that does not serve the
     # domain yet would hand users an error.
     npm_enable || { notify "$(tt 'Failover failed' 'Failover fallido')" "$(tt 'Could not enable the NPM host.' 'No se pudo habilitar el host de NPM.')" "alert"; return 1; }
@@ -457,11 +513,40 @@ maybe_replicate() {
 # The settings page reads this instead of running its own check: it shows what
 # the watcher actually sees, and costs nothing to display.
 publish_health() {
-    printf 'health=%s\nfails=%s\nchecked=%s\n' "$1" "$2" "$(date +%s)" > "$STATE/health"
+    printf 'health=%s\nfails=%s\nchecked=%s\ntarget=%s\n' \
+           "$1" "$2" "$(date +%s)" "$(cat "$STATE/target_health" 2>/dev/null || echo off)" \
+           > "$STATE/health"
+}
+
+# Checked on its own slower clock, not on every pass: the standby breaking is a
+# slow kind of accident (a bad sync, a permissions change), and there is no point
+# knocking on it every few seconds. Only transitions are announced, so a copy
+# that stays broken does not turn into a notification every five minutes.
+check_target() {
+    local now state prev
+    now=$(date +%s)
+    [ -z "$TARGET_HEALTH_URL" ] && { echo off > "$STATE/target_health"; return 0; }
+    [ $((now - ${last_target_check:-0})) -lt "$TARGET_CHECK_INTERVAL" ] && return 0
+    last_target_check="$now"
+
+    target_app_ok && state=ok || state=fail
+    prev=$(cat "$STATE/target_health" 2>/dev/null)
+    echo "$state" > "$STATE/target_health"
+    [ "$state" = "$prev" ] && return 0
+
+    if [ "$state" = "fail" ]; then
+        log "STANDBY COPY UNHEALTHY: $TARGET_HEALTH_URL is not answering as expected"
+        notify "$(tt 'Standby copy is broken' 'La copia en espera está rota')" \
+               "$(tt "The copy on this box answered wrongly at $TARGET_HEALTH_URL. A failover right now would serve a broken site." "La copia de este servidor respondió mal en $TARGET_HEALTH_URL. Un failover ahora serviría un sitio roto.")" "alert"
+    elif [ -n "$prev" ] && [ "$prev" != "off" ]; then
+        log "Standby copy is healthy again"
+        notify "$(tt 'Standby copy is healthy again' 'La copia en espera vuelve a estar sana')" \
+               "$(tt "$TARGET_HEALTH_URL answers as expected again." "$TARGET_HEALTH_URL vuelve a responder como se espera.")" "normal"
+    fi
 }
 
 watch_loop() {
-    local fails=0 st booting=0
+    local fails=0 st booting=0 last_target_check=0
     log "Watcher started (every ${CHECK_INTERVAL}s, $FAIL_THRESHOLD failures to switch)"
     echo $$ > "$STATE/watcher.pid"
     trap 'rm -f "$STATE/watcher.pid"; exit 0' TERM INT
@@ -476,6 +561,12 @@ watch_loop() {
             sleep "$CHECK_INTERVAL"; continue
         fi
         booting=0
+
+        # Watched even while switched over: after a failover the standby IS the
+        # live site, and it is exactly then that knowing it works matters most.
+        # Kept after the boot grace on purpose — a copy whose container is still
+        # starting is not a broken copy.
+        check_target
 
         origin_health; st=$?
         publish_health "$st" "$fails"
@@ -541,6 +632,9 @@ case "$MODE" in
                "$([ $h -eq 0 ] && tt HEALTHY SANO || ([ $h -eq 2 ] && tt INCONCLUSIVE 'NO CONCLUYENTE' || tt DOWN CAÍDO))"
         printf "%-${w}s %s\n" "$(tt 'target ready:' 'destino listo:')" \
                "$(target_ready && echo OK || echo "$(tt FAIL FALLO)")"
+        target_app_ok; ta=$?
+        printf "%-${w}s %s\n" "$(tt 'standby copy:' 'copia en espera:')" \
+               "$([ $ta -eq 2 ] && tt 'not configured' 'sin configurar' || { [ $ta -eq 0 ] && tt HEALTHY SANA || tt BROKEN ROTA; })"
         printf "%-${w}s %s\n" "$(tt 'npm host:' 'host de NPM:')" \
                "$(s=$(npm_state); [ "$s" = "1" ] && tt 'enabled' 'habilitado' || { [ "$s" = "0" ] && tt 'disabled' 'deshabilitado' || echo "$s"; })"
         printf "%-${w}s %s\n" "$(tt 'switched:' 'conmutado:')" \
@@ -549,22 +643,24 @@ case "$MODE" in
                "$(watcher_running && tt running 'en marcha' || tt stopped parado)"
         ;;
     status)
-        health=""; fails=""; checked=""
+        health=""; fails=""; checked=""; target=""
         [ -f "$STATE/health" ] && . "$STATE/health"
         jq -n --arg enabled "$ENABLED" \
+              --arg target "${target:-off}" \
               --arg watcher "$(watcher_running && echo running || echo stopped)" \
               --arg switched "$([ -f "$STATE/switched" ] && echo yes || echo no)" \
               --arg npm "$(npm_state)" \
               --arg last "$(cat "$STATE/last_replicate" 2>/dev/null || echo 0)" \
               --arg health "${health:-}" --arg fails "${fails:-0}" --arg checked "${checked:-0}" \
               '{enabled:$enabled,watcher:$watcher,switched:$switched,npm_host:$npm,
-                last_replicate:$last,health:$health,fails:$fails,checked:$checked}'
+                last_replicate:$last,health:$health,fails:$fails,checked:$checked,
+                target:$target}'
         ;;
     *) echo "usage: $0 {watch|failover|failback|replicate|test|status}"; exit 1 ;;
 esac
 ]]>
  </INLINE>
- <SHA256>a877f011595e6646387bc65736750a5062c92a04a84cfa3f6f8dd703ffbaee10</SHA256>
+ <SHA256>a63fa1e7e5eba930ab3dd0142e675ac8fc14554b0968a58d4ca479ca9f72f889</SHA256>
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/failover-guard/scripts/supervise" Mode="0755">
@@ -671,6 +767,10 @@ switch ($health) {
     default:  $hlabel = t('unknown', 'desconocido');     $hclass = 'fg-warn'; break;
 }
 if ($stale) { $hlabel = t('no recent reading', 'sin lectura reciente'); $hclass = 'fg-warn'; }
+
+/* The standby is shown next to the origin on purpose. A failover system where
+   nobody ever looks at plan B is how a replica ends up broken for days. */
+$target = $status['target'] ?? 'off';
 ?>
 
 <style>
@@ -691,6 +791,11 @@ if ($stale) { $hlabel = t('no recent reading', 'sin lectura reciente'); $hclass 
   <span class="fg-hero <?= $hclass ?>"><?= t('Origin', 'Origen') ?>: <?= $hlabel ?></span>
   <?php if (!$stale && $fails > 0): ?>
     <span class="fg-state fg-warn"><?= t('Consecutive failures', 'Fallos seguidos') ?>: <?= $fails ?>/<?= v($cfg,'FAIL_THRESHOLD','3') ?></span>
+  <?php endif; ?>
+  <?php if ($target !== 'off'): ?>
+    <span class="fg-state <?= $target === 'ok' ? 'fg-ok' : 'fg-bad' ?>">
+      <?= t('Standby copy', 'Copia en espera') ?>: <?= $target === 'ok' ? t('healthy','sana') : t('BROKEN','ROTA') ?>
+    </span>
   <?php endif; ?>
   <span class="fg-state <?= $switched ? 'fg-warn' : 'fg-ok' ?>">
     <?= $switched ? t('FAILED OVER — serving locally', 'CONMUTADO — sirviendo en local')
@@ -806,6 +911,26 @@ if ($stale) { $hlabel = t('no recent reading', 'sin lectura reciente'); $hclass 
 > <?= t('The numeric id of the proxy host in NPM that serves this site from your Unraid box. Open that host in the NPM interface and read the number at the end of the address bar. <b>Leave that host disabled</b> in normal times: the plugin enables it only during a failover, so two copies of your site never accept writes at the same time.',
                    'El número identificador del proxy host de NPM que sirve este sitio desde tu Unraid. Abre ese host en la interfaz de NPM y mira el número al final de la barra de direcciones. <b>Deja ese host deshabilitado</b> en condiciones normales: el plugin lo habilita solo durante un failover, para que nunca haya dos copias de tu sitio aceptando escrituras a la vez.') ?>
 
+### <?= t('Standby copy', 'Copia en espera') ?>
+
+**<?= t('Standby health URL', 'URL de salud de la copia') ?>:**
+: <input type="text" name="TARGET_HEALTH_URL" value="<?= v($cfg,'TARGET_HEALTH_URL') ?>" placeholder="http://192.168.100.62/api/health">
+
+> <?= t('Optional but strongly recommended: a URL where <b>the copy on this box</b> answers, checked every few minutes so you find out that plan B is broken <b>before</b> you need it, not during the outage. Point it straight at the backend (the container address), not at the public domain: while the proxy host is disabled — which is the correct resting state — the site is not reachable here by its public name. Leave empty to skip this check.',
+                   'Opcional pero muy recomendable: una URL donde responda <b>la copia de este servidor</b>, que se comprueba cada pocos minutos para que te enteres de que el plan B está roto <b>antes</b> de necesitarlo, no durante la caída. Apúntala directamente al backend (la dirección del contenedor), no al dominio público: mientras el proxy host está deshabilitado — que es el reposo correcto — el sitio no es alcanzable aquí por su nombre público. Déjala vacía para no hacer esta comprobación.') ?>
+
+**<?= t('Expected in the response', 'Texto esperado en la respuesta') ?>:**
+: <input type="text" name="TARGET_EXPECT" value="<?= v($cfg,'TARGET_EXPECT') ?>" placeholder='"ok":true'>
+
+> <?= t('Text the standby answer must contain. Leave empty to accept any non-empty answer — but a page that returns an error message with a 200 status would pass that way, which is exactly the failure this check exists to catch.',
+                   'Texto que debe contener la respuesta de la copia. Déjalo vacío para aceptar cualquier respuesta no vacía — pero así pasaría una página que devuelve un mensaje de error con estado 200, que es justo el fallo que esta comprobación existe para detectar.') ?>
+
+**<?= t('Standby check interval (s)', 'Intervalo de comprobación (s)') ?>:**
+: <input type="number" name="TARGET_CHECK_INTERVAL" min="30" value="<?= v($cfg,'TARGET_CHECK_INTERVAL','300') ?>">
+
+> <?= t('How often the standby is asked, in seconds. It does not need the origin\'s pace: a copy breaks slowly, through a bad sync or a permissions change, not from one second to the next. Only changes are notified, so a copy that stays broken does not keep alerting you.',
+                   'Cada cuánto se pregunta a la copia, en segundos. No necesita el ritmo del origen: una copia se rompe despacio, por una sincronización mala o un cambio de permisos, no de un segundo para otro. Solo se avisa de los cambios, así que una copia que sigue rota no te avisa una y otra vez.') ?>
+
 ### <?= t('Data hooks', 'Enganches de datos') ?>
 
 **<?= t('Replicate hook', 'Enganche de réplica') ?>:**
@@ -910,7 +1035,7 @@ $(function() {
 </script>
 ]]>
  </INLINE>
- <SHA256>4616008c3aeca597a18ad20c32f11716dd0b52a82ae88e313f2d14196d00b5e8</SHA256>
+ <SHA256>0c82e3d25fd60b67fc758ffa1849cccb75005ddd0a9ca912e001e9d43e67add4</SHA256>
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/failover-guard/include/action.php" Mode="0644">
@@ -980,10 +1105,14 @@ FAIL_THRESHOLD="3"
 NPM_DATA=""
 NPM_CONTAINER="Nginx-Proxy-Manager-Official"
 NPM_HOST_ID=""
+TARGET_HEALTH_URL=""
+TARGET_EXPECT=""
+TARGET_CHECK_INTERVAL="300"
 HOOK_REPLICATE=""
 HOOK_PRE_FAILBACK=""
 REPLICATE_INTERVAL="3600"
 RETRY_INTERVAL="60"
+BOOT_GRACE="300"
 NOTIFY="yes"
 CFG
   chmod 600 &cfgdir;/config
