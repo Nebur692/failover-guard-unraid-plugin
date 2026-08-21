@@ -69,6 +69,9 @@ Then go to **Settings → Failover Guard**.
 | `CF_TOKEN` | Cloudflare API token. Needs Zone:Read and DNS:Edit on that zone only. |
 | `CHECK_INTERVAL` / `FAIL_THRESHOLD` | Detection time is roughly interval × threshold. |
 | `NPM_*` | Optional. Data path, container name and the proxy host ID to enable during a failover. |
+| `TARGET_HEALTH_URL` | Optional but strongly recommended. A URL where the standby copy **on this box** answers, so you learn plan B is broken before you need it. Point it at the backend, not at the public name: the proxy host is disabled at rest. |
+| `TARGET_EXPECT` | String the standby answer must contain. Without it, an error page returned with a 200 status would pass. |
+| `TARGET_CHECK_INTERVAL` | How often the standby is asked. Only changes are notified. |
 | `HOOK_REPLICATE` | Runs while the origin is healthy: copies origin → here. |
 | `HOOK_PRE_FAILBACK` | Runs before returning: copies here → origin. |
 
@@ -182,6 +185,9 @@ Después ve a **Settings → Failover Guard**.
 | `CF_TOKEN` | Token de API de Cloudflare. Necesita Zone:Read y DNS:Edit solo sobre esa zona. |
 | `CHECK_INTERVAL` / `FAIL_THRESHOLD` | El tiempo de detección es aproximadamente intervalo × fallos. |
 | `NPM_*` | Opcional. Ruta de datos, nombre del contenedor y el ID del proxy host que se habilita durante el failover. |
+| `TARGET_HEALTH_URL` | Opcional pero muy recomendable. Una URL donde responda la copia **de este servidor**, para enterarte de que el plan B está roto antes de necesitarlo. Apúntala al backend, no al nombre público: el proxy host está deshabilitado en reposo. |
+| `TARGET_EXPECT` | Texto que debe contener la respuesta de la copia. Sin él, pasaría una página de error devuelta con estado 200. |
+| `TARGET_CHECK_INTERVAL` | Cada cuánto se pregunta a la copia. Solo se avisa de los cambios. |
 | `HOOK_REPLICATE` | Se ejecuta mientras el origen está sano: copia origen → aquí. |
 | `HOOK_PRE_FAILBACK` | Se ejecuta antes de volver: copia aquí → origen. |
 
