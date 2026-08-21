@@ -37,6 +37,9 @@ FAIL_THRESHOLD=3
 NPM_DATA=""                   # e.g. /mnt/cache/appdata/NginxProxyManager/data
 NPM_CONTAINER="Nginx-Proxy-Manager-Official"
 NPM_HOST_ID=""
+TARGET_HEALTH_URL=""          # optional: URL of the standby copy ON THIS BOX
+TARGET_EXPECT=""              # optional: string its response must contain
+TARGET_CHECK_INTERVAL=300     # how often to ask the standby whether it still works
 HOOK_REPLICATE=""             # runs while the origin is healthy: origin -> here
 HOOK_PRE_FAILBACK=""          # runs before returning: here -> origin
 REPLICATE_INTERVAL=3600
@@ -159,6 +162,23 @@ origin_health() {
     return 0
 }
 
+# Is the standby copy on this box actually able to serve? Everything else here
+# watches the origin; without this the only thing ever checked about plan B is
+# that a DNS record resolves. A replica can sit there for days answering errors
+# and nothing notices until the day it has to take over.
+#
+# It has to be asked at a URL that works while the copy is at rest: if the proxy
+# host is disabled (which is the correct resting state) the site is not reachable
+# by its public name from here, so this points straight at the backend.
+# 0 = healthy · 1 = not healthy · 2 = not configured
+target_app_ok() {
+    [ -z "$TARGET_HEALTH_URL" ] && return 2
+    local body
+    body=$(timeout 10 curl -s --max-time 10 "$TARGET_HEALTH_URL" 2>/dev/null) || return 1
+    [ -z "$TARGET_EXPECT" ] && { [ -n "$body" ] && return 0 || return 1; }
+    case "$body" in *"$TARGET_EXPECT"*) return 0 ;; *) return 1 ;; esac
+}
+
 # Never send traffic to a failover target that is not ready: if your dynamic DNS
 # has not caught up, switching sends users nowhere. Worse than staying put.
 target_ready() {
@@ -171,6 +191,16 @@ target_ready() {
             ip_w=$(timeout 8 curl -s https://api.ipify.org 2>/dev/null)
             [ -z "$ip_w" ] && return 0
             [ "$ip_t" = "$ip_w" ] && return 0
+            # A mismatch used to be an outright veto. It cannot be, on a box
+            # behind more than one internet line: there is no single "our public
+            # IP" then, and the line traffic happens to leave by is not
+            # necessarily the one the record points at. So when the standby copy
+            # itself answers, that is better evidence than the address
+            # comparison and it wins.
+            if target_app_ok; then
+                log "Failover target $FAILOVER_TARGET resolves to $ip_t and traffic leaves through $ip_w, but the standby copy answers: switching anyway"
+                return 0
+            fi
             log "Failover target $FAILOVER_TARGET resolves to $ip_t but our public IP is $ip_w"
             return 1 ;;
         *) return 0 ;;
@@ -269,6 +299,15 @@ do_failover() {
         return 1
     fi
 
+    # A standby that answers wrongly is a warning, never a veto. Refusing here
+    # would turn "the site is degraded" into "the site is down", and this probe
+    # can be wrong too. The decision belongs to whoever reads the alert.
+    if ! target_app_ok && [ -n "$TARGET_HEALTH_URL" ]; then
+        log "WARNING: the standby copy is not answering as expected; switching anyway, but check it now"
+        notify "$(tt 'Failover onto a copy that looks broken' 'Failover a una copia que parece rota')" \
+               "$(tt "Switching because the origin is down, but $TARGET_HEALTH_URL is not answering as expected. Check the site." "Se conmuta porque el origen está caído, pero $TARGET_HEALTH_URL no responde como se espera. Revisa el sitio.")" "alert"
+    fi
+
     # Enable locally first: switching DNS onto a box that does not serve the
     # domain yet would hand users an error.
     npm_enable || { notify "$(tt 'Failover failed' 'Failover fallido')" "$(tt 'Could not enable the NPM host.' 'No se pudo habilitar el host de NPM.')" "alert"; return 1; }
@@ -348,11 +387,40 @@ maybe_replicate() {
 # The settings page reads this instead of running its own check: it shows what
 # the watcher actually sees, and costs nothing to display.
 publish_health() {
-    printf 'health=%s\nfails=%s\nchecked=%s\n' "$1" "$2" "$(date +%s)" > "$STATE/health"
+    printf 'health=%s\nfails=%s\nchecked=%s\ntarget=%s\n' \
+           "$1" "$2" "$(date +%s)" "$(cat "$STATE/target_health" 2>/dev/null || echo off)" \
+           > "$STATE/health"
+}
+
+# Checked on its own slower clock, not on every pass: the standby breaking is a
+# slow kind of accident (a bad sync, a permissions change), and there is no point
+# knocking on it every few seconds. Only transitions are announced, so a copy
+# that stays broken does not turn into a notification every five minutes.
+check_target() {
+    local now state prev
+    now=$(date +%s)
+    [ -z "$TARGET_HEALTH_URL" ] && { echo off > "$STATE/target_health"; return 0; }
+    [ $((now - ${last_target_check:-0})) -lt "$TARGET_CHECK_INTERVAL" ] && return 0
+    last_target_check="$now"
+
+    target_app_ok && state=ok || state=fail
+    prev=$(cat "$STATE/target_health" 2>/dev/null)
+    echo "$state" > "$STATE/target_health"
+    [ "$state" = "$prev" ] && return 0
+
+    if [ "$state" = "fail" ]; then
+        log "STANDBY COPY UNHEALTHY: $TARGET_HEALTH_URL is not answering as expected"
+        notify "$(tt 'Standby copy is broken' 'La copia en espera está rota')" \
+               "$(tt "The copy on this box answered wrongly at $TARGET_HEALTH_URL. A failover right now would serve a broken site." "La copia de este servidor respondió mal en $TARGET_HEALTH_URL. Un failover ahora serviría un sitio roto.")" "alert"
+    elif [ -n "$prev" ] && [ "$prev" != "off" ]; then
+        log "Standby copy is healthy again"
+        notify "$(tt 'Standby copy is healthy again' 'La copia en espera vuelve a estar sana')" \
+               "$(tt "$TARGET_HEALTH_URL answers as expected again." "$TARGET_HEALTH_URL vuelve a responder como se espera.")" "normal"
+    fi
 }
 
 watch_loop() {
-    local fails=0 st booting=0
+    local fails=0 st booting=0 last_target_check=0
     log "Watcher started (every ${CHECK_INTERVAL}s, $FAIL_THRESHOLD failures to switch)"
     echo $$ > "$STATE/watcher.pid"
     trap 'rm -f "$STATE/watcher.pid"; exit 0' TERM INT
@@ -367,6 +435,12 @@ watch_loop() {
             sleep "$CHECK_INTERVAL"; continue
         fi
         booting=0
+
+        # Watched even while switched over: after a failover the standby IS the
+        # live site, and it is exactly then that knowing it works matters most.
+        # Kept after the boot grace on purpose — a copy whose container is still
+        # starting is not a broken copy.
+        check_target
 
         origin_health; st=$?
         publish_health "$st" "$fails"
@@ -432,6 +506,9 @@ case "$MODE" in
                "$([ $h -eq 0 ] && tt HEALTHY SANO || ([ $h -eq 2 ] && tt INCONCLUSIVE 'NO CONCLUYENTE' || tt DOWN CAÍDO))"
         printf "%-${w}s %s\n" "$(tt 'target ready:' 'destino listo:')" \
                "$(target_ready && echo OK || echo "$(tt FAIL FALLO)")"
+        target_app_ok; ta=$?
+        printf "%-${w}s %s\n" "$(tt 'standby copy:' 'copia en espera:')" \
+               "$([ $ta -eq 2 ] && tt 'not configured' 'sin configurar' || { [ $ta -eq 0 ] && tt HEALTHY SANA || tt BROKEN ROTA; })"
         printf "%-${w}s %s\n" "$(tt 'npm host:' 'host de NPM:')" \
                "$(s=$(npm_state); [ "$s" = "1" ] && tt 'enabled' 'habilitado' || { [ "$s" = "0" ] && tt 'disabled' 'deshabilitado' || echo "$s"; })"
         printf "%-${w}s %s\n" "$(tt 'switched:' 'conmutado:')" \
@@ -440,16 +517,18 @@ case "$MODE" in
                "$(watcher_running && tt running 'en marcha' || tt stopped parado)"
         ;;
     status)
-        health=""; fails=""; checked=""
+        health=""; fails=""; checked=""; target=""
         [ -f "$STATE/health" ] && . "$STATE/health"
         jq -n --arg enabled "$ENABLED" \
+              --arg target "${target:-off}" \
               --arg watcher "$(watcher_running && echo running || echo stopped)" \
               --arg switched "$([ -f "$STATE/switched" ] && echo yes || echo no)" \
               --arg npm "$(npm_state)" \
               --arg last "$(cat "$STATE/last_replicate" 2>/dev/null || echo 0)" \
               --arg health "${health:-}" --arg fails "${fails:-0}" --arg checked "${checked:-0}" \
               '{enabled:$enabled,watcher:$watcher,switched:$switched,npm_host:$npm,
-                last_replicate:$last,health:$health,fails:$fails,checked:$checked}'
+                last_replicate:$last,health:$health,fails:$fails,checked:$checked,
+                target:$target}'
         ;;
     *) echo "usage: $0 {watch|failover|failback|replicate|test|status}"; exit 1 ;;
 esac
