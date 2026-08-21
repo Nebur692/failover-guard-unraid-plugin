@@ -55,6 +55,10 @@ switch ($health) {
     default:  $hlabel = t('unknown', 'desconocido');     $hclass = 'fg-warn'; break;
 }
 if ($stale) { $hlabel = t('no recent reading', 'sin lectura reciente'); $hclass = 'fg-warn'; }
+
+/* The standby is shown next to the origin on purpose. A failover system where
+   nobody ever looks at plan B is how a replica ends up broken for days. */
+$target = $status['target'] ?? 'off';
 ?>
 
 <style>
@@ -75,6 +79,11 @@ if ($stale) { $hlabel = t('no recent reading', 'sin lectura reciente'); $hclass 
   <span class="fg-hero <?= $hclass ?>"><?= t('Origin', 'Origen') ?>: <?= $hlabel ?></span>
   <?php if (!$stale && $fails > 0): ?>
     <span class="fg-state fg-warn"><?= t('Consecutive failures', 'Fallos seguidos') ?>: <?= $fails ?>/<?= v($cfg,'FAIL_THRESHOLD','3') ?></span>
+  <?php endif; ?>
+  <?php if ($target !== 'off'): ?>
+    <span class="fg-state <?= $target === 'ok' ? 'fg-ok' : 'fg-bad' ?>">
+      <?= t('Standby copy', 'Copia en espera') ?>: <?= $target === 'ok' ? t('healthy','sana') : t('BROKEN','ROTA') ?>
+    </span>
   <?php endif; ?>
   <span class="fg-state <?= $switched ? 'fg-warn' : 'fg-ok' ?>">
     <?= $switched ? t('FAILED OVER — serving locally', 'CONMUTADO — sirviendo en local')
@@ -189,6 +198,26 @@ if ($stale) { $hlabel = t('no recent reading', 'sin lectura reciente'); $hclass 
 
 > <?= t('The numeric id of the proxy host in NPM that serves this site from your Unraid box. Open that host in the NPM interface and read the number at the end of the address bar. <b>Leave that host disabled</b> in normal times: the plugin enables it only during a failover, so two copies of your site never accept writes at the same time.',
                    'El número identificador del proxy host de NPM que sirve este sitio desde tu Unraid. Abre ese host en la interfaz de NPM y mira el número al final de la barra de direcciones. <b>Deja ese host deshabilitado</b> en condiciones normales: el plugin lo habilita solo durante un failover, para que nunca haya dos copias de tu sitio aceptando escrituras a la vez.') ?>
+
+### <?= t('Standby copy', 'Copia en espera') ?>
+
+**<?= t('Standby health URL', 'URL de salud de la copia') ?>:**
+: <input type="text" name="TARGET_HEALTH_URL" value="<?= v($cfg,'TARGET_HEALTH_URL') ?>" placeholder="http://192.168.100.62/api/health">
+
+> <?= t('Optional but strongly recommended: a URL where <b>the copy on this box</b> answers, checked every few minutes so you find out that plan B is broken <b>before</b> you need it, not during the outage. Point it straight at the backend (the container address), not at the public domain: while the proxy host is disabled — which is the correct resting state — the site is not reachable here by its public name. Leave empty to skip this check.',
+                   'Opcional pero muy recomendable: una URL donde responda <b>la copia de este servidor</b>, que se comprueba cada pocos minutos para que te enteres de que el plan B está roto <b>antes</b> de necesitarlo, no durante la caída. Apúntala directamente al backend (la dirección del contenedor), no al dominio público: mientras el proxy host está deshabilitado — que es el reposo correcto — el sitio no es alcanzable aquí por su nombre público. Déjala vacía para no hacer esta comprobación.') ?>
+
+**<?= t('Expected in the response', 'Texto esperado en la respuesta') ?>:**
+: <input type="text" name="TARGET_EXPECT" value="<?= v($cfg,'TARGET_EXPECT') ?>" placeholder='"ok":true'>
+
+> <?= t('Text the standby answer must contain. Leave empty to accept any non-empty answer — but a page that returns an error message with a 200 status would pass that way, which is exactly the failure this check exists to catch.',
+                   'Texto que debe contener la respuesta de la copia. Déjalo vacío para aceptar cualquier respuesta no vacía — pero así pasaría una página que devuelve un mensaje de error con estado 200, que es justo el fallo que esta comprobación existe para detectar.') ?>
+
+**<?= t('Standby check interval (s)', 'Intervalo de comprobación (s)') ?>:**
+: <input type="number" name="TARGET_CHECK_INTERVAL" min="30" value="<?= v($cfg,'TARGET_CHECK_INTERVAL','300') ?>">
+
+> <?= t('How often the standby is asked, in seconds. It does not need the origin\'s pace: a copy breaks slowly, through a bad sync or a permissions change, not from one second to the next. Only changes are notified, so a copy that stays broken does not keep alerting you.',
+                   'Cada cuánto se pregunta a la copia, en segundos. No necesita el ritmo del origen: una copia se rompe despacio, por una sincronización mala o un cambio de permisos, no de un segundo para otro. Solo se avisa de los cambios, así que una copia que sigue rota no te avisa una y otra vez.') ?>
 
 ### <?= t('Data hooks', 'Enganches de datos') ?>
 
