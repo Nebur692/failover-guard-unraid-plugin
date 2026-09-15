@@ -1,3 +1,16 @@
+###2026.09.15
+- The supervisor had never run. Once. The plugin wrote its /etc/cron.d/ entry
+  with a user column, the way Debian-style crontabs take one, but Unraid runs
+  dcron and there the sixth field is already the command. So every five minutes
+  cron tried to execute a command called "root", failed with 127, and the thing
+  whose whole job is to bring the watcher back after a crash, an array restart or
+  a plugin update was never alive to do it. The watcher itself was fine -- but it
+  survived on luck, not on care, and nothing would have said otherwise.
+- If you are already running this plugin, check your syslog for "exit status 127"
+  before and after updating: that, and not the contents of the file, is what
+  proves it is fixed. Run by hand the script exits 0 either way, so reproducing
+  the fault outside cron is impossible.
+
 ###2026.08.21.1
 - The standby copy is watched too. Until now the only thing ever checked about
   plan B was that a DNS record resolved, so a replica could sit for days

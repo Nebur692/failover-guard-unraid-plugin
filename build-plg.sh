@@ -105,8 +105,15 @@ fi
 
 # The watcher is a long-lived process; this keeps it alive across crashes,
 # array restarts and plugin updates.
+#
+# NO USER FIELD. Unraid runs dcron, and its /etc/cron.d/ does not take the user
+# column that Debian-style crontabs have: the sixth field is already the command.
+# With "root" in there, dcron tried to run a command called root every five
+# minutes and exited 127 -- so this supervisor had never run, not once, and the
+# watcher was alive only because nothing had killed it yet. Unraid own lines are
+# written the same way, without a user.
 cat &gt; /etc/cron.d/&name; &lt;&lt;'CRON'
-*/5 * * * * root /usr/local/emhttp/plugins/failover-guard/scripts/supervise >/dev/null 2>&amp;1
+*/5 * * * * /usr/local/emhttp/plugins/failover-guard/scripts/supervise >/dev/null 2>&amp;1
 CRON
 [ -x /usr/local/sbin/update_cron ] &amp;&amp; /usr/local/sbin/update_cron
 
