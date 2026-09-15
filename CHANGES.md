@@ -1,3 +1,16 @@
+###2026.09.15.1
+- The cron entry now goes where Unraid actually looks for it. 2026.09.15 removed
+  the stray user column but kept writing /etc/cron.d/failover-guard directly, and
+  that is not a Debian-style drop-in directory here: it is dcron own spool, the
+  one "crontab -c /etc/cron.d" owns. update_cron never even reads it. What Unraid
+  plugins do -- dynamix and the rest, right there on any box -- is drop a .cron
+  file in their own directory under /boot/config/plugins/ and call update_cron,
+  which concatenates them into root crontab. So the supervisor STILL had not run
+  after the previous release; the syslog said so five minutes later, which is the
+  only thing that ever says so.
+- Installing also removes the old /etc/cron.d/failover-guard, so anyone updating
+  from a broken version does not keep firing the bad entry next to the good one.
+
 ###2026.09.15
 - The supervisor had never run. Once. The plugin wrote its /etc/cron.d/ entry
   with a user column, the way Debian-style crontabs take one, but Unraid runs

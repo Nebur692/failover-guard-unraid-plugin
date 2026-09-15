@@ -57,7 +57,11 @@ cat <<'HEADER2'
 <CHANGES>
 HEADER2
 
-cat CHANGES.md
+# Escapado, no volcado tal cual: el 15-09-2026 un "<plugin>" dentro del propio
+# changelog convirtio el .plg en XML invalido. Lo cazo xmllint al final, que para
+# eso esta, pero el fallo vuelve cada vez que alguien escribe una etiqueta o un &
+# al documentar. El contenido no puede romper el continente.
+sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' CHANGES.md
 
 cat <<'MID'
 </CHANGES>
@@ -106,15 +110,26 @@ fi
 # The watcher is a long-lived process; this keeps it alive across crashes,
 # array restarts and plugin updates.
 #
-# NO USER FIELD. Unraid runs dcron, and its /etc/cron.d/ does not take the user
-# column that Debian-style crontabs have: the sixth field is already the command.
-# With "root" in there, dcron tried to run a command called root every five
-# minutes and exited 127 -- so this supervisor had never run, not once, and the
-# watcher was alive only because nothing had killed it yet. Unraid own lines are
-# written the same way, without a user.
-cat &gt; /etc/cron.d/&name; &lt;&lt;'CRON'
-*/5 * * * * /usr/local/emhttp/plugins/failover-guard/scripts/supervise >/dev/null 2>&amp;1
+# THE UNRAID WAY: a .cron file under the plugin's own config directory, and then
+# update_cron. That script concatenates /boot/config/plugins/*/*.cron into root's
+# crontab -- it does NOT read /etc/cron.d/, which on Unraid is dcron's spool
+# (crontab -c /etc/cron.d), not Debian's drop-in directory.
+#
+# Writing straight into /etc/cron.d/ is what this plugin used to do, and it never
+# worked: the entry also carried a user column, so every five minutes dcron tried
+# to run a command called "root" and exited 127. The supervisor -- whose entire
+# job is to bring the watcher back after a crash, an array restart or a plugin
+# update -- had never run once. No user column here either: these lines end up in
+# root's crontab, where the sixth field is already the command.
+cat &gt; &cfgdir;/&name;.cron &lt;&lt;'CRON'
+# Keep the watcher alive across crashes, array restarts and plugin updates:
+*/5 * * * * /usr/local/emhttp/plugins/failover-guard/scripts/supervise &amp;&gt; /dev/null
 CRON
+
+# Clean up after the versions that wrote it in the wrong place, or dcron would
+# keep firing the broken entry next to the good one.
+rm -f /etc/cron.d/&name;
+
 [ -x /usr/local/sbin/update_cron ] &amp;&amp; /usr/local/sbin/update_cron
 
 &plugdir;/scripts/supervise >/dev/null 2>&amp;1 || true
@@ -133,7 +148,8 @@ echo ""
 <INLINE>
 PID=$(cat &cfgdir;/state/watcher.pid 2>/dev/null)
 [ -n "$PID" ] &amp;&amp; kill "$PID" 2>/dev/null
-rm -f /etc/cron.d/&name;
+rm -f &cfgdir;/&name;.cron
+rm -f /etc/cron.d/&name;            # por si viene de una version anterior
 [ -x /usr/local/sbin/update_cron ] &amp;&amp; /usr/local/sbin/update_cron
 rm -rf &plugdir;
 echo ""
