@@ -88,13 +88,17 @@ notify() {
 
 cf_api() {
     local method="$1" path="$2" data="$3"
+    # The token goes to curl on stdin (-H @-), not as an argument: arguments
+    # are readable by any local process in /proc/<pid>/cmdline.
     if [ -n "$data" ]; then
-        curl -s -X "$method" -H "Authorization: Bearer $CF_TOKEN" \
+        curl -s -X "$method" -H @- \
              -H "Content-Type: application/json" --data "$data" \
-             "https://api.cloudflare.com/client/v4$path"
+             "https://api.cloudflare.com/client/v4$path" \
+             <<< "Authorization: Bearer $CF_TOKEN"
     else
-        curl -s -X "$method" -H "Authorization: Bearer $CF_TOKEN" \
-             "https://api.cloudflare.com/client/v4$path"
+        curl -s -X "$method" -H @- \
+             "https://api.cloudflare.com/client/v4$path" \
+             <<< "Authorization: Bearer $CF_TOKEN"
     fi
 }
 

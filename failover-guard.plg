@@ -240,13 +240,17 @@ notify() {
 
 cf_api() {
     local method="$1" path="$2" data="$3"
+    # The token goes to curl on stdin (-H @-), not as an argument: arguments
+    # are readable by any local process in /proc/<pid>/cmdline.
     if [ -n "$data" ]; then
-        curl -s -X "$method" -H "Authorization: Bearer $CF_TOKEN" \
+        curl -s -X "$method" -H @- \
              -H "Content-Type: application/json" --data "$data" \
-             "https://api.cloudflare.com/client/v4$path"
+             "https://api.cloudflare.com/client/v4$path" \
+             <<< "Authorization: Bearer $CF_TOKEN"
     else
-        curl -s -X "$method" -H "Authorization: Bearer $CF_TOKEN" \
-             "https://api.cloudflare.com/client/v4$path"
+        curl -s -X "$method" -H @- \
+             "https://api.cloudflare.com/client/v4$path" \
+             <<< "Authorization: Bearer $CF_TOKEN"
     fi
 }
 
@@ -686,7 +690,7 @@ case "$MODE" in
 esac
 ]]>
  </INLINE>
- <SHA256>a63fa1e7e5eba930ab3dd0142e675ac8fc14554b0968a58d4ca479ca9f72f889</SHA256>
+ <SHA256>7a52bf7fc2591701c007ac283644fd4670514ee92da08c8fdff8775ea0a1cb84</SHA256>
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/failover-guard/scripts/supervise" Mode="0755">
