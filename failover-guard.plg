@@ -3,7 +3,7 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "failover-guard">
 <!ENTITY author    "Nebur692">
-<!ENTITY version   "2026.09.15.1">
+<!ENTITY version   "2026.10.16">
 <!ENTITY launch    "Settings/FailoverGuard">
 <!ENTITY gitURL    "https://raw.githubusercontent.com/Nebur692/failover-guard-unraid-plugin/main">
 <!ENTITY pluginURL "&gitURL;/&name;.plg">
@@ -17,6 +17,14 @@
         min="6.12.0">
 
 <CHANGES>
+###2026.10.16
+- The Cloudflare token no longer shows up in the process list. Every call to the
+  Cloudflare API passed it to curl as a command-line argument, and on Linux any
+  local process can read another process's arguments, so for the second each
+  call lasted the token was there for anything running on the server to see.
+  It now reaches curl on its standard input. Pointed out, with a ready-made
+  patch, by the Community Applications review.
+
 ###2026.09.15.1
 - The cron entry now goes where Unraid actually looks for it. 2026.09.15 removed
   the stray user column but kept writing /etc/cron.d/failover-guard directly, and
@@ -240,13 +248,17 @@ notify() {
 
 cf_api() {
     local method="$1" path="$2" data="$3"
+    # The token goes to curl on stdin (-H @-), not as an argument: arguments
+    # are readable by any local process in /proc/<pid>/cmdline.
     if [ -n "$data" ]; then
-        curl -s -X "$method" -H "Authorization: Bearer $CF_TOKEN" \
+        curl -s -X "$method" -H @- \
              -H "Content-Type: application/json" --data "$data" \
-             "https://api.cloudflare.com/client/v4$path"
+             "https://api.cloudflare.com/client/v4$path" \
+             <<< "Authorization: Bearer $CF_TOKEN"
     else
-        curl -s -X "$method" -H "Authorization: Bearer $CF_TOKEN" \
-             "https://api.cloudflare.com/client/v4$path"
+        curl -s -X "$method" -H @- \
+             "https://api.cloudflare.com/client/v4$path" \
+             <<< "Authorization: Bearer $CF_TOKEN"
     fi
 }
 
@@ -686,7 +698,7 @@ case "$MODE" in
 esac
 ]]>
  </INLINE>
- <SHA256>a63fa1e7e5eba930ab3dd0142e675ac8fc14554b0968a58d4ca479ca9f72f889</SHA256>
+ <SHA256>7a52bf7fc2591701c007ac283644fd4670514ee92da08c8fdff8775ea0a1cb84</SHA256>
 </FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/failover-guard/scripts/supervise" Mode="0755">

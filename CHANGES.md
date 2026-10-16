@@ -1,3 +1,11 @@
+###2026.10.16
+- The Cloudflare token no longer shows up in the process list. Every call to the
+  Cloudflare API passed it to curl as a command-line argument, and on Linux any
+  local process can read another process's arguments, so for the second each
+  call lasted the token was there for anything running on the server to see.
+  It now reaches curl on its standard input. Pointed out, with a ready-made
+  patch, by the Community Applications review.
+
 ###2026.09.15.1
 - The cron entry now goes where Unraid actually looks for it. 2026.09.15 removed
   the stray user column but kept writing /etc/cron.d/failover-guard directly, and
